@@ -3,30 +3,25 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Satellite Launcher — Booster Impact Tracker</title>
+  <title>Booster Impact Tracker</title>
   <link rel="stylesheet" href="style.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 </head>
 <body>
 
-<h1>Satellite Launcher — Booster Impact Tracker</h1>
-<p class="sub">Run with low thrust/propellant to simulate a suborbital booster and find where it lands</p>
+<h1>Booster Impact Tracker</h1>
+<p class="sub">Guided booster simulation — set a target hit point and let the booster navigate to it using lateral acceleration</p>
 
 <div class="grid2">
   <div class="card">
     <div class="slabel">Booster parameters</div>
-    <div class="pr">
-      <span class="pl">Payload mass (kg)</span>
-      <input type="range" min="50" max="2000" step="50" value="300" id="mPay" style="flex:1" oninput="u('mPay','vPay',v=>v+' kg')">
-      <span class="pv" id="vPay">300 kg</span>
-    </div>
     <div class="pr">
       <span class="pl">Propellant mass (kg)</span>
       <input type="range" min="500" max="30000" step="500" value="5000" id="mProp" style="flex:1" oninput="u('mProp','vProp',v=>v+' kg')">
       <span class="pv" id="vProp">5000 kg</span>
     </div>
     <div class="pr">
-      <span class="pl">Structural mass (kg)</span>
+      <span class="pl">Booster dry mass (kg)</span>
       <input type="range" min="200" max="5000" step="100" value="800" id="mStr" style="flex:1" oninput="u('mStr','vStr',v=>v+' kg')">
       <span class="pv" id="vStr">800 kg</span>
     </div>
@@ -61,6 +56,11 @@
       <span class="pv" id="vDiam">1.2 m</span>
     </div>
     <div class="pr">
+      <span class="pl">Post-burnout Cd</span>
+      <input type="range" min="0.5" max="3.0" step="0.1" value="1.2" id="cdFall" style="flex:1" oninput="u('cdFall','vCdFall',v=>parseFloat(v).toFixed(1)+' (tumbling)')">
+      <span class="pv" id="vCdFall">1.2 (tumbling)</span>
+    </div>
+    <div class="pr">
       <span class="pl">Atmosphere model</span>
       <select id="atm">
         <option value="isa" selected>ISA standard</option>
@@ -68,35 +68,36 @@
         <option value="none">Vacuum</option>
       </select>
     </div>
-    <div class="slabel" style="margin-top:10px">Trajectory &amp; launch</div>
+    <div class="slabel" style="margin-top:10px">Trajectory &amp; guidance</div>
     <div class="pr">
       <span class="pl">Launch angle (°)</span>
       <input type="range" min="30" max="90" step="1" value="75" id="angle" style="flex:1" oninput="u('angle','vAngle',v=>v+'°')">
       <span class="pv" id="vAngle">75°</span>
     </div>
     <div class="pr">
-      <span class="pl">Launch latitude (°)</span>
-      <input type="range" min="-45" max="45" step="1" value="28" id="lat" style="flex:1" oninput="u('lat','vLat',v=>v+'°')">
-      <span class="pv" id="vLat">28°</span>
+      <span class="pl">Target downrange (km)</span>
+      <input type="range" min="10" max="500" step="5" value="100" id="xTarget" style="flex:1" oninput="u('xTarget','vTarget',v=>v+' km')">
+      <span class="pv" id="vTarget">100 km</span>
     </div>
     <div class="pr">
-      <span class="pl">Post-burnout Cd</span>
-      <input type="range" min="0.5" max="3.0" step="0.1" value="1.2" id="cdFall" style="flex:1" oninput="u('cdFall','vCdFall',v=>parseFloat(v).toFixed(1)+' (tumbling)')">
-      <span class="pv" id="vCdFall">1.2 (tumbling)</span>
+      <span class="pl">Max lateral accel (g)</span>
+      <input type="range" min="0.1" max="5" step="0.1" value="1.0" id="aLatMax" style="flex:1" oninput="u('aLatMax','vALatMax',v=>parseFloat(v).toFixed(1)+' g')">
+      <span class="pv" id="vALatMax">1.0 g</span>
     </div>
     <button class="rbtn" onclick="run()">Run simulation</button>
   </div>
 </div>
 
-<div class="grid4">
+<div style="display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; margin-bottom:12px">
   <div class="mc"><div class="ml">Max altitude</div><div class="mv" id="mAlt">—</div><div class="mu">km</div></div>
   <div class="mc"><div class="ml">Max velocity</div><div class="mv" id="mVel">—</div><div class="mu">m/s</div></div>
   <div class="mc"><div class="ml">Burnout altitude</div><div class="mv" id="mBurnH">—</div><div class="mu">km</div></div>
   <div class="mc"><div class="ml">Impact range</div><div class="mv" id="mImpact">—</div><div class="mu">km downrange</div></div>
+  <div class="mc"><div class="ml">Miss distance</div><div class="mv" id="mMiss">—</div><div class="mu">m from target</div></div>
 </div>
 
 <div class="impact-box" id="impactBox">
-  Booster impact: <strong id="impactDetail">—</strong>
+  <strong id="impactDetail">—</strong>
 </div>
 
 <div class="card" style="margin-top:12px">
@@ -106,6 +107,7 @@
     <button class="tab" onclick="sc(2)">Velocity</button>
     <button class="tab" onclick="sc(3)">Drag vs thrust</button>
     <button class="tab" onclick="sc(4)">Acceleration</button>
+    <button class="tab" onclick="sc(5)">Control effort</button>
   </div>
   <div class="chart-wrap"><canvas id="ch"></canvas></div>
 </div>
