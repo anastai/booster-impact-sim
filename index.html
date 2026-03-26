@@ -10,7 +10,7 @@
 <body>
 
 <h1>Booster Impact Tracker</h1>
-<p class="sub">Guided booster simulation — set a target hit point and let the booster navigate to it using lateral acceleration</p>
+<p class="sub">3-D guided booster — lateral acceleration steers toward the target hit point throughout the flight</p>
 
 <div class="grid2">
   <div class="card">
@@ -61,6 +61,11 @@
       <span class="pv" id="vCdFall">1.2 (tumbling)</span>
     </div>
     <div class="pr">
+      <span class="pl">Actuator drag Cd</span>
+      <input type="range" min="0" max="1.0" step="0.05" value="0.3" id="cdCtrl" style="flex:1" oninput="u('cdCtrl','vCdCtrl',v=>parseFloat(v).toFixed(2))">
+      <span class="pv" id="vCdCtrl">0.30</span>
+    </div>
+    <div class="pr">
       <span class="pl">Atmosphere model</span>
       <select id="atm">
         <option value="isa" selected>ISA standard</option>
@@ -75,9 +80,14 @@
       <span class="pv" id="vAngle">75°</span>
     </div>
     <div class="pr">
-      <span class="pl">Target downrange (km)</span>
+      <span class="pl">Target X downrange (km)</span>
       <input type="range" min="10" max="500" step="5" value="100" id="xTarget" style="flex:1" oninput="u('xTarget','vTarget',v=>v+' km')">
       <span class="pv" id="vTarget">100 km</span>
+    </div>
+    <div class="pr">
+      <span class="pl">Target Y crossrange (km)</span>
+      <input type="range" min="-200" max="200" step="5" value="0" id="yTarget" style="flex:1" oninput="u('yTarget','vYTarget',v=>v+' km')">
+      <span class="pv" id="vYTarget">0 km</span>
     </div>
     <div class="pr">
       <span class="pl">Max lateral accel (g)</span>
@@ -88,11 +98,12 @@
   </div>
 </div>
 
-<div style="display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; margin-bottom:12px">
+<div style="display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:10px; margin-bottom:12px">
   <div class="mc"><div class="ml">Max altitude</div><div class="mv" id="mAlt">—</div><div class="mu">km</div></div>
   <div class="mc"><div class="ml">Max velocity</div><div class="mv" id="mVel">—</div><div class="mu">m/s</div></div>
   <div class="mc"><div class="ml">Burnout altitude</div><div class="mv" id="mBurnH">—</div><div class="mu">km</div></div>
-  <div class="mc"><div class="ml">Impact range</div><div class="mv" id="mImpact">—</div><div class="mu">km downrange</div></div>
+  <div class="mc"><div class="ml">Impact X</div><div class="mv" id="mImpactX">—</div><div class="mu">km downrange</div></div>
+  <div class="mc"><div class="ml">Impact Y</div><div class="mv" id="mImpactY">—</div><div class="mu">km crossrange</div></div>
   <div class="mc"><div class="ml">Miss distance</div><div class="mv" id="mMiss">—</div><div class="mu">m from target</div></div>
 </div>
 
@@ -103,11 +114,12 @@
 <div class="card" style="margin-top:12px">
   <div class="tabs">
     <button class="tab active" onclick="sc(0)">Trajectory</button>
-    <button class="tab" onclick="sc(1)">Altitude</button>
-    <button class="tab" onclick="sc(2)">Velocity</button>
-    <button class="tab" onclick="sc(3)">Drag vs thrust</button>
-    <button class="tab" onclick="sc(4)">Acceleration</button>
-    <button class="tab" onclick="sc(5)">Control effort</button>
+    <button class="tab" onclick="sc(1)">Top-down</button>
+    <button class="tab" onclick="sc(2)">Altitude</button>
+    <button class="tab" onclick="sc(3)">Velocity</button>
+    <button class="tab" onclick="sc(4)">Drag vs thrust</button>
+    <button class="tab" onclick="sc(5)">Acceleration</button>
+    <button class="tab" onclick="sc(6)">Control effort</button>
   </div>
   <div class="chart-wrap"><canvas id="ch"></canvas></div>
 </div>
