@@ -40,6 +40,7 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
     thrust_n         = params.thrust_kn * 1_000.0
     x_target_m       = params.x_target  * 1_000.0
     y_target_m       = params.y_target  * 1_000.0
+    z_target_m       = params.z_target  * 1_000.0
     a_lat_max_ms2    = params.a_lat_max * G0
     launch_angle_rad = math.radians(params.launch_angle)
     Aref             = math.pi * (params.diam / 2.0) ** 2
@@ -57,14 +58,18 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
     series: dict[str, list] = {k: [] for k in [
         't', 'x', 'y', 'h', 'v',
         'thr', 'drag_aero', 'drag_ctrl', 'acc',
-        'aLat', 'aLat_x', 'aLat_y',
+        'aLat', 'aLat_x', 'aLat_y', 'aLat_z',
     ]}
 
     # --- Accumulators ---
-    max_h      = 0.0
-    max_v      = 0.0
-    burnout_h  = 0.0
-    burnout_t  = 0.0
+    max_h             = 0.0
+    max_v             = 0.0
+    burnout_h         = 0.0
+    burnout_t         = 0.0
+    # Track whether booster has risen sufficiently above z_target before
+    # checking the termination condition (avoids false-triggering at launch
+    # when z_target > 0 and booster starts at h=0).
+    passed_above_target = (z_target_m <= 0.0)
 
     # --- Main integration loop ---
     for i in range(_MAX_STEPS):
@@ -104,10 +109,12 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
         cd_now_pre    = params.cd if state.engine_on else params.cd_fall
         drag_aero_pre = 0.5 * density(params.atm, state.h) * spd * spd * Aref * cd_now_pre
         if spd > 0.01 and state.mass > 0:
-            a_drag_x_now = -(drag_aero_pre / state.mass) * (state.vx / spd)
-            a_drag_y_now = -(drag_aero_pre / state.mass) * (state.vy / spd)
+            drag_a = drag_aero_pre / state.mass
+            a_drag_x_now = -drag_a * (state.vx / spd)
+            a_drag_y_now = -drag_a * (state.vy / spd)
+            a_drag_z_now = -drag_a * (state.vh / spd)
         else:
-            a_drag_x_now = a_drag_y_now = 0.0
+            a_drag_x_now = a_drag_y_now = a_drag_z_now = 0.0
 
         # Guidance: ZEM, active post-burnout only.
         # During powered ascent the ballistic TTG from current position is a
@@ -120,9 +127,10 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
             a_lat = lateral_accel_command(
                 state.x, state.y, state.h,
                 state.vx, state.vy, state.vh, spd,
-                x_target_m, y_target_m, a_lat_max_ms2, grav,
+                x_target_m, y_target_m, z_target_m, a_lat_max_ms2, grav,
                 a_drag_x=a_drag_x_now,
                 a_drag_y=a_drag_y_now,
+                a_drag_z=a_drag_z_now,
             )
         else:
             a_lat = (0.0, 0.0, 0.0)
@@ -150,6 +158,7 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
             series['aLat'].append(round(aLat_mag / G0, 4))
             series['aLat_x'].append(round(aLat_x  / G0, 4))
             series['aLat_y'].append(round(aLat_y  / G0, 4))
+            series['aLat_z'].append(round(aLat_z  / G0, 4))
 
         # Integrate one step
         state, acc_mag = integrate_step(
@@ -166,19 +175,18 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
         if spd > max_v:
             max_v = spd
 
-        # Ground hit
-        if state.h <= 0.0:
-            state = State(
-                x=state.x, y=state.y, h=0.0,
-                vx=state.vx, vy=state.vy, vh=state.vh,
-                mass=state.mass, t=state.t,
-                engine_on=state.engine_on,
-                prop_remaining=state.prop_remaining,
-            )
+        # Target-altitude hit (or ground)
+        if state.h > z_target_m + 50.0:
+            passed_above_target = True
+        if passed_above_target and state.h <= z_target_m:
+            break
+        if state.h <= 0.0:   # safety: never go underground
             break
 
     miss = math.sqrt(
-        (state.x - x_target_m) ** 2 + (state.y - y_target_m) ** 2
+        (state.x - x_target_m) ** 2 +
+        (state.y - y_target_m) ** 2 +
+        (state.h - z_target_m) ** 2
     )
 
     summary = {
@@ -188,6 +196,7 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
         'burnout_time_s':      round(burnout_t, 1),
         'impact_x_km':         round(state.x / 1_000, 2),
         'impact_y_km':         round(state.y / 1_000, 2),
+        'impact_z_km':         round(state.h / 1_000, 2),
         'miss_distance_m':     round(miss, 1),
         'flight_time_s':       round(state.t, 1),
     }

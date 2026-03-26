@@ -39,6 +39,7 @@ class Params:
     launch_angle: float = 75.0      # elevation angle           (deg)
     x_target:     float = 100.0     # target downrange          (km)
     y_target:     float = 0.0       # target crossrange         (km)
+    z_target:     float = 0.0       # target altitude           (km, + above / - below launch)
     a_lat_max:    float = 1.0       # max lateral acceleration  (g)
 
 
