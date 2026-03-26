@@ -9,20 +9,20 @@ from plot import plot_results
 
 # Define parameters (user-friendly units)
 params = Params(
-    m_prop       = 5_000,   # kg
-    m_str        = 800,     # kg
-    isp          = 260,     # s
-    thrust_kn    = 120,     # kN
-    burn_max     = 60,      # s
+    m_prop       = 50,   # kg
+    m_str        = 100,     # kg
+    isp          = 230,     # s
+    thrust_kn    = 20,     # kN
+    burn_max     = 10,      # s
     cd           = 0.4,
-    cd_fall      = 1.2,
+    cd_fall      = 0.5,
     cd_ctrl      = 0.3,
     diam         = 1.2,     # m
     atm          = 'isa',
-    launch_angle = 75,      # deg
-    x_target     = 100,     # km downrange
-    y_target     = 0,       # km crossrange
-    a_lat_max    = 1.0,     # g
+    launch_angle = 50,      # deg
+    x_target     = 10,     # km downrange
+    y_target     = 10,       # km crossrange
+    a_lat_max    = 5.0,     # g
 )
 
 result = simulate(params)
