@@ -1,7 +1,16 @@
 """
-Check vectors for the booster simulation.
+Check vectors for the booster simulation — v2.0 (velocity frame).
 
 Run with:  pytest tests/check_vectors.py -v
+
+Test baseline assumptions
+--------------------------
+make() defaults to launch_azimuth=0 (North = +x direction) and
+grav_turn=False (fixed body angle, engine always completes full burn_max).
+This matches the old Cartesian-state convention so that:
+  - x = downrange (North)
+  - y = crossrange (East)
+  - engine burnout always occurs → ZEM guidance always activates post-burnout
 """
 import math
 import pytest
@@ -14,9 +23,20 @@ from sim.physics import Params
 # ---------------------------------------------------------------------------
 
 def make(base: Params = None, **overrides) -> Params:
-    """Return a Params instance with selected fields overridden."""
+    """
+    Return a Params instance with selected fields overridden.
+
+    Defaults used here:
+      launch_azimuth = 0   → booster flies North (+x), matching test expectations
+                             that treat x as the downrange axis.
+      grav_turn      = False → fixed body angle; engine always runs to burn_max,
+                               guaranteeing burnout occurs and ZEM guidance activates.
+    """
     from dataclasses import replace
-    p = base if base is not None else Params()
+    p = base if base is not None else Params(
+        launch_azimuth=0.0,   # fly North so impact_x_km is the natural downrange metric
+        grav_turn=False,      # fixed angle → predictable burnout → guidance always active
+    )
     return replace(p, **overrides)
 
 
@@ -27,7 +47,7 @@ def make(base: Params = None, **overrides) -> Params:
 class TestDeterminism:
     def test_same_params_same_result(self):
         """Identical inputs must produce identical outputs."""
-        p  = Params()
+        p  = make()
         r1 = simulate(p)
         r2 = simulate(p)
         assert r1['summary'] == r2['summary']
@@ -40,8 +60,13 @@ class TestDeterminism:
 class TestPhysicsInvariants:
     def test_vertical_launch_zero_crossrange(self):
         """
-        90° launch with no crossrange target and zero lateral limit
-        → booster should stay on the x-z plane (y ≈ 0).
+        90° launch with azimuth=0, grav_turn=False, no crossrange target and
+        zero lateral limit → booster must stay on the x-z plane (y ≈ 0).
+
+        With grav_turn=False and launch_angle=90°:
+          alpha = launch_angle - gamma_v = 90° - 90° = 0° → T_nV = 0
+          dgamma_v/dt = 0 → gamma_v stays at 90° throughout
+          gamma_h = 0 → all horizontal motion in x, none in y.
         """
         p = make(launch_angle=90.0, y_target=0.0, a_lat_max=0.0)
         r = simulate(p)
@@ -61,13 +86,13 @@ class TestPhysicsInvariants:
 
     def test_altitude_non_negative(self):
         """Altitude must never go below ground."""
-        p = Params()
+        p = make()
         r = simulate(p)
         assert all(h >= 0.0 for h in r['series']['h'])
 
     def test_burnout_altitude_below_max(self):
-        """Burnout happens during ascent, so burnout altitude < max altitude."""
-        p = Params()
+        """Burnout happens during ascent, so burnout altitude ≤ max altitude."""
+        p = make()
         r = simulate(p)
         s = r['summary']
         assert s['burnout_altitude_km'] <= s['max_altitude_km']
@@ -83,10 +108,10 @@ class TestGuidance:
         Guidance should reduce miss when the target is close to the ballistic
         landing point (reachable with finite lateral acceleration).
 
-        Strategy: find ballistic impact, set target 10 km further, then
+        Strategy: find ballistic impact x, set target 10 km further, then
         compare guided vs unguided miss to that target.
         """
-        # Step 1 — find ballistic landing point
+        # Step 1 — find ballistic landing point (no guidance)
         p_bal = make(a_lat_max=0.0)
         bx = simulate(p_bal)['summary']['impact_x_km']
 
@@ -109,11 +134,11 @@ class TestGuidance:
 
     def test_crossrange_guidance(self):
         """Guidance should drive the booster toward a non-zero crossrange target."""
-        p_no_target  = make(y_target=0.0,   a_lat_max=2.0)
-        p_with_target= make(y_target=30.0,  a_lat_max=2.0)
+        p_no_target   = make(y_target=0.0,  a_lat_max=2.0)
+        p_with_target = make(y_target=30.0, a_lat_max=2.0)
         y_no  = simulate(p_no_target  )['summary']['impact_y_km']
         y_hit = simulate(p_with_target)['summary']['impact_y_km']
-        # The guided run should land closer to y=30 km
+        # The guided run should land closer to y=30 km than the unguided run
         assert abs(y_hit - 30.0) < abs(y_no - 30.0)
 
     def test_zero_lateral_limit_is_ballistic(self):
