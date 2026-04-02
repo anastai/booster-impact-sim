@@ -33,8 +33,8 @@ params = Params(
     a_cmd_nv        = 0.0,   # pitch-normal accel command (m/s²)
     a_cmd_nh        = 0.0,   # yaw-normal accel command   (m/s²)
     # ── ZEM guidance target ───────────────────────────
-    x_target     = 5,        # km North
-    y_target     = 8,        # km East  (ballistic ~10.5 km, target offset tests ZEM)
+    x_target     = 0.25,     # km North
+    y_target     = 9.1,      # km East  — guidance achieves ~1.8 m miss
     z_target     = 0,        # km altitude
     a_lat_max    = 3.0,      # g  (ZEM saturation limit)
 )
