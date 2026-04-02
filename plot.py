@@ -127,13 +127,11 @@ def plot_results(result: dict, params: Params = None) -> None:
     # ── [7] Control effort (ZEM lateral) ────────────────────────────────
     ax7 = fig.add_subplot(gs[2, 1])
     ax7.fill_between(t, s['aLat'], alpha=0.18, color='#1D9E75')
-    ax7.plot(t, s['aLat'],   color='#1D9E75', linewidth=1.5, label='|aLat|')
-    ax7.plot(t, s['aLat_x'], color='#378ADD', linewidth=1.0,
-             linestyle='--', label='X (north)')
-    ax7.plot(t, s['aLat_y'], color='#D4537E', linewidth=1.0,
-             linestyle='--', label='Y (east)')
-    ax7.plot(t, s['aLat_z'], color='#E8A020', linewidth=1.0,
-             linestyle='--', label='Z (up)')
+    ax7.plot(t, s['aLat'], color='#1D9E75', linewidth=1.5, label='|aLat|')
+    ax7.plot(t, s['a_nV'], color='#378ADD', linewidth=1.0,
+             linestyle='--', label='ê_nV (pitch)')
+    ax7.plot(t, s['a_nH'], color='#D4537E', linewidth=1.0,
+             linestyle='--', label='ê_nH (yaw)')
     if params is not None:
         lim = params.a_lat_max
         ax7.axhline( lim, color='#D85A30', linewidth=1.0,

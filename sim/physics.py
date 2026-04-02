@@ -161,11 +161,11 @@ def integrate_step(
                         T_t  = F·cos(α)
                         T_nV = F·sin(α)
 
-    ZEM projection
-    --------------
-    The ZEM guidance returns a command in the inertial frame (ax, ay, az).
-    It is projected onto the velocity-frame normal axes ê_nV and ê_nH before
-    entering the dγV/dt and dγH/dt equations.
+    ZEM command
+    -----------
+    a_zem is a (a_nV, a_nH) tuple already expressed in velocity-frame normal
+    axes (output of guidance.lateral_accel_command).  Applied directly to the
+    dγV/dt and dγH/dt equations without further projection.
 
     Returns
     -------
@@ -184,14 +184,8 @@ def integrate_step(
         T_nV  = thrust_n * math.sin(alpha)
         T_nH  = 0.0
 
-    # ── ZEM command projected onto ê_nV and ê_nH ──────────────────────────
-    # ê_nV inertial components: [−sin(γV)cos(γH), −sin(γV)sin(γH), cos(γV)]
-    # ê_nH inertial components: [−sin(γH),          cos(γH),         0    ]
-    ax_z, ay_z, az_z = a_zem
-    a_zem_nV = (-ax_z * math.sin(gV) * math.cos(gH)
-                -ay_z * math.sin(gV) * math.sin(gH)
-                +az_z * math.cos(gV))
-    a_zem_nH = -ax_z * math.sin(gH) + ay_z * math.cos(gH)
+    # ── ZEM command (already in velocity-frame normals) ───────────────────
+    a_zem_nV, a_zem_nH = a_zem
 
     drag_tot = drag_aero + drag_ctrl
 

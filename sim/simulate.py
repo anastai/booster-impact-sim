@@ -60,7 +60,7 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
         't', 'x', 'y', 'h', 'v',
         'gamma_v', 'gamma_h',
         'thr', 'drag_aero', 'lift', 'drag_ctrl', 'acc',
-        'aLat', 'aLat_x', 'aLat_y', 'aLat_z',
+        'aLat', 'a_nV', 'a_nH',
     ]}
 
     # ── Accumulators ──────────────────────────────────────────────────────
@@ -113,24 +113,20 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
             max_lift = lift
 
         # ── ZEM guidance (active only post-burnout) ───────────────────────
-        vx, vy, vh = state.vel_inertial()
         if not state.engine_on and spd > 0.01 and state.mass > 0:
-            cd_now_drag = params.cd_fall
-            drag_a      = (0.5 * rho * spd * spd * Aref * cd_now_drag) / state.mass
-            a_drag_x    = -drag_a * (vx / spd) if spd > 0.01 else 0.0
-            a_drag_y    = -drag_a * (vy / spd) if spd > 0.01 else 0.0
-            a_drag_z    = -drag_a * (vh / spd) if spd > 0.01 else 0.0
+            # scalar tangential drag deceleration (negative = decelerating)
+            a_drag_t = -(0.5 * rho * spd * spd * Aref * params.cd_fall) / state.mass
             a_zem = lateral_accel_command(
                 state.x, state.y, state.h,
-                vx, vy, vh, spd,
+                spd, state.gamma_v, state.gamma_h,
                 x_target_m, y_target_m, z_target_m, a_lat_max_ms2, grav,
-                a_drag_x=a_drag_x, a_drag_y=a_drag_y, a_drag_z=a_drag_z,
+                a_drag_t=a_drag_t,
             )
         else:
-            a_zem = (0.0, 0.0, 0.0)
+            a_zem = (0.0, 0.0)
 
-        aLat_x, aLat_y, aLat_z = a_zem
-        aLat_mag = math.sqrt(aLat_x**2 + aLat_y**2 + aLat_z**2)
+        a_nV, a_nH = a_zem
+        aLat_mag = math.sqrt(a_nV**2 + a_nH**2)
 
         # Actuator drag (proportional to lateral demand²)
         drag_ctrl = (qS * params.cd_ctrl * (aLat_mag / a_lat_max_ms2) ** 2
@@ -151,10 +147,9 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
             series['lift']     .append(round(lift         / 1_000, 2))
             series['drag_ctrl'].append(round(drag_ctrl    / 1_000, 2))
             series['acc']      .append(0.0)   # overwritten after integrate
-            series['aLat']     .append(round(aLat_mag / G0, 4))
-            series['aLat_x']   .append(round(aLat_x   / G0, 4))
-            series['aLat_y']   .append(round(aLat_y   / G0, 4))
-            series['aLat_z']   .append(round(aLat_z   / G0, 4))
+            series['aLat']  .append(round(aLat_mag / G0, 4))
+            series['a_nV']  .append(round(a_nV     / G0, 4))
+            series['a_nH']  .append(round(a_nH     / G0, 4))
 
         # ── Integrate one step ────────────────────────────────────────────
         state, acc_mag = integrate_step(
