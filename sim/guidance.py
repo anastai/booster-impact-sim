@@ -1,14 +1,23 @@
 """
-Guidance law: Zero-Effort Miss (ZEM) — velocity-frame edition (v2.0).
+Guidance law: Proportional Navigation (PN) — velocity-frame edition (v2.0).
 
-The guidance works entirely in velocity-frame coordinates:
-  - Impact is predicted in the inertial frame (using current v, γV, γH)
-  - The ZEM correction is computed in inertial frame
-  - It is projected DIRECTLY onto ê_nV and ê_nH (no intermediate
-    "perpendicular to velocity" step — that projection is implicit because
-    ê_nV and ê_nH already span the normal plane)
-  - Output: (a_nV, a_nH) in m/s²  — ready to drop into the dγV/dt and
-    dγH/dt equations without further transformation
+Pure PN formulation
+-------------------
+The acceleration command is proportional to the LOS (line-of-sight) angular
+rate, scaled by the closing velocity:
+
+    a_cmd = N · Vc · dλ/dt
+
+where:
+    λ     = (target − missile) / |target − missile|   — LOS unit vector
+    Vc    = v_missile · λ                              — closing velocity (m/s)
+    dλ/dt = (Ṙ − (Ṙ·λ)λ) / r                         — LOS angular rate (rad/s)
+    Ṙ     = −v_missile                                 — relative velocity (target fixed)
+    N     = navigation constant (typically 3–5)
+
+The resulting 3-D acceleration vector is perpendicular to the LOS direction
+and is then projected onto the velocity-frame normal axes ê_nV and ê_nH to
+produce the (a_nV, a_nH) commands used by the equations of motion.
 
 Velocity-frame axes (inertial components)
 ------------------------------------------
@@ -18,20 +27,7 @@ Velocity-frame axes (inertial components)
 """
 import math
 
-GUIDANCE_GAIN = 4.0   # navigation constant (N in PN terminology)
-_TTG_REG      = 1.0   # regularisation — avoids division by zero near impact (s²)
-
-
-def estimate_ttg(h: float, vh: float, grav: float, h_target: float = 0.0) -> float:
-    """
-    Drag-free time-to-target-altitude estimate (s).
-    Solves  (h − h_target) + vh·t − ½·g·t² = 0  for the positive root.
-    """
-    delta_h = h - h_target
-    disc    = vh * vh + 2.0 * grav * delta_h
-    if disc < 0.0 or delta_h <= 0.0:
-        return 0.1
-    return max((vh + math.sqrt(disc)) / grav, 0.1)
+GUIDANCE_GAIN = 4.0   # navigation constant N
 
 
 def lateral_accel_command(
@@ -43,7 +39,8 @@ def lateral_accel_command(
     a_drag_t: float = 0.0,
 ) -> tuple:
     """
-    Compute lateral acceleration commands (m/s²) in the velocity frame.
+    Compute lateral acceleration commands (m/s²) in the velocity frame
+    using Proportional Navigation.
 
     Parameters
     ----------
@@ -55,22 +52,26 @@ def lateral_accel_command(
     y_target       : target East  position (m)
     z_target       : target altitude      (m)
     a_lat_max      : saturation limit (m/s²)
-    grav           : local gravity (m/s²)
-    a_drag_t       : tangential drag deceleration (m/s², negative = decelerating).
-                     Used to correct the impact prediction for aerodynamic drag.
+    grav           : local gravity (m/s²)  — unused by pure PN, kept for API compat
+    a_drag_t       : tangential drag (m/s²) — unused by pure PN, kept for API compat
 
     Returns
     -------
     (a_nV, a_nH)   : acceleration commands in the velocity frame (m/s²)
-                     a_nV acts along ê_nV (pitch-normal, upward from velocity)
-                     a_nH acts along ê_nH (yaw-normal, lateral)
-                     Both are perpendicular to the velocity vector by construction.
     """
-    delta_h = h - z_target
-    if delta_h <= 50.0 or v <= 1.0 or a_lat_max <= 0.0:
+    # ── Range to target ───────────────────────────────────────────────────────
+    Rx = x_target - x
+    Ry = y_target - y
+    Rz = z_target - h
+    r  = math.sqrt(Rx*Rx + Ry*Ry + Rz*Rz)
+
+    if r < 50.0 or v <= 1.0 or a_lat_max <= 0.0:
         return 0.0, 0.0
 
-    # ── Velocity components in inertial frame ─────────────────────────────
+    # ── LOS unit vector ────────────────────────────────────────────────────────
+    lx, ly, lz = Rx / r, Ry / r, Rz / r
+
+    # ── Missile velocity (inertial) ────────────────────────────────────────────
     cos_gV = math.cos(gamma_v)
     sin_gV = math.sin(gamma_v)
     cos_gH = math.cos(gamma_h)
@@ -78,38 +79,38 @@ def lateral_accel_command(
 
     vx = v * cos_gV * cos_gH   # North
     vy = v * cos_gV * sin_gH   # East
-    vh = v * sin_gV             # Up
+    vz = v * sin_gV             # Up
 
-    # ── Time-to-target estimate ───────────────────────────────────────────
-    ttg = estimate_ttg(h, vh, grav, h_target=z_target)
+    # ── Closing velocity: Vc = v_missile · λ ──────────────────────────────────
+    Vc = vx*lx + vy*ly + vz*lz
+    if Vc <= 0.0:               # moving away from target — no command
+        return 0.0, 0.0
 
-    # ── Drag-corrected predicted impact (constant-drag extrapolation) ─────
-    # Drag acts along ê_t → inertial drag components
-    a_drag_x = a_drag_t * cos_gV * cos_gH
-    a_drag_y = a_drag_t * cos_gV * sin_gH
-    a_drag_z = a_drag_t * sin_gV
+    # ── Relative velocity: Ṙ = d(target − missile)/dt = −v_missile ────────────
+    Rvx, Rvy, Rvz = -vx, -vy, -vz
 
-    x_pred = x + vx * ttg + 0.5 * a_drag_x * ttg ** 2
-    y_pred = y + vy * ttg + 0.5 * a_drag_y * ttg ** 2
-    z_pred = h + vh * ttg + 0.5 * a_drag_z * ttg ** 2
+    # ── LOS angular rate: dλ/dt = (Ṙ − (Ṙ·λ)λ) / r ──────────────────────────
+    Rdl  = Rvx*lx + Rvy*ly + Rvz*lz   # = −Vc
+    dlx  = (Rvx - Rdl*lx) / r
+    dly  = (Rvy - Rdl*ly) / r
+    dlz  = (Rvz - Rdl*lz) / r
 
-    # ── ZEM desired correction (inertial frame) ───────────────────────────
-    denom  = ttg * ttg + _TTG_REG
-    ax_des = GUIDANCE_GAIN * (x_target - x_pred) / denom
-    ay_des = GUIDANCE_GAIN * (y_target - y_pred) / denom
-    az_des = GUIDANCE_GAIN * (z_target - z_pred) / denom
+    # ── PN command in inertial frame: a = N · Vc · dλ/dt ─────────────────────
+    ax_des = GUIDANCE_GAIN * Vc * dlx
+    ay_des = GUIDANCE_GAIN * Vc * dly
+    az_des = GUIDANCE_GAIN * Vc * dlz
 
-    # ── Project directly onto velocity-frame normal axes ──────────────────
-    # ê_nV = [-sin(γV)·cos(γH), -sin(γV)·sin(γH), cos(γV)]
+    # ── Project onto velocity-frame normal axes ────────────────────────────────
+    # ê_nV = [−sin(γV)cos(γH), −sin(γV)sin(γH), cos(γV)]
     a_nV = (-ax_des * sin_gV * cos_gH
             -ay_des * sin_gV * sin_gH
             +az_des * cos_gV)
 
-    # ê_nH = [-sin(γH), cos(γH), 0]
+    # ê_nH = [−sin(γH), cos(γH), 0]
     a_nH = -ax_des * sin_gH + ay_des * cos_gH
 
-    # ── Saturate resultant ────────────────────────────────────────────────
-    mag = math.sqrt(a_nV * a_nV + a_nH * a_nH)
+    # ── Saturate resultant ────────────────────────────────────────────────────
+    mag = math.sqrt(a_nV*a_nV + a_nH*a_nH)
     if mag > a_lat_max:
         s    = a_lat_max / mag
         a_nV *= s

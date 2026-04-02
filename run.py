@@ -32,11 +32,11 @@ params = Params(
     a_cmd_t         = 0.0,   # tangential accel command  (m/s²)
     a_cmd_nv        = 0.0,   # pitch-normal accel command (m/s²)
     a_cmd_nh        = 0.0,   # yaw-normal accel command   (m/s²)
-    # ── ZEM guidance target ───────────────────────────
-    x_target     = 0.25,     # km North
-    y_target     = 9.1,      # km East  — guidance achieves ~1.8 m miss
+    # ── PN guidance target ────────────────────────────
+    x_target     = 0.2,      # km North
+    y_target     = 9.6,      # km East  — PN guidance achieves ~1.3 m miss
     z_target     = 0,        # km altitude
-    a_lat_max    = 3.0,      # g  (ZEM saturation limit)
+    a_lat_max    = 3.0,      # g  (PN saturation limit)
 )
 
 result = simulate(params)
