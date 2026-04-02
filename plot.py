@@ -50,7 +50,8 @@ def plot_results(result: dict, params: Params = None) -> None:
     ax0 = fig.add_subplot(gs[0, 0])
     ax0.plot(downrange_km, s['h'], color='#378ADD', linewidth=1.5, label='Trajectory')
     if params is not None:
-        ax0.scatter([params.x_target], [0], color='#D85A30',
+        target_downrange = math.sqrt(params.x_target**2 + params.y_target**2)
+        ax0.scatter([target_downrange], [0], color='#D85A30',
                     marker='x', s=120, zorder=5, label='Target')
     ax0.set_xlabel('Downrange √(x²+y²) (km)')
     ax0.set_ylabel('Altitude (km)')

@@ -112,10 +112,10 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
         if lift > max_lift:
             max_lift = lift
 
-        # ── ZEM guidance (active only post-burnout) ───────────────────────
-        if not state.engine_on and spd > 0.01 and state.mass > 0:
-            # scalar tangential drag deceleration (negative = decelerating)
-            a_drag_t = -(0.5 * rho * spd * spd * Aref * params.cd_fall) / state.mass
+        # ── PN guidance (active throughout flight when speed > threshold) ──
+        if spd > 0.01 and state.mass > 0:
+            cd_now_drag = params.cd if state.engine_on else params.cd_fall
+            a_drag_t = -(0.5 * rho * spd * spd * Aref * cd_now_drag) / state.mass
             a_zem = lateral_accel_command(
                 state.x, state.y, state.h,
                 spd, state.gamma_v, state.gamma_h,

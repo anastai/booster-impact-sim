@@ -33,8 +33,8 @@ params = Params(
     a_cmd_nv        = 0.0,   # pitch-normal accel command (m/s²)
     a_cmd_nh        = 0.0,   # yaw-normal accel command   (m/s²)
     # ── PN guidance target ────────────────────────────
-    x_target     = 0.2,      # km North
-    y_target     = 9.6,      # km East  — PN guidance achieves ~1.3 m miss
+    x_target     = 1.0,      # km North
+    y_target     = 6.0,      # km East  — full-flight PN achieves ~1.3 m miss
     z_target     = 0,        # km altitude
     a_lat_max    = 3.0,      # g  (PN saturation limit)
 )
