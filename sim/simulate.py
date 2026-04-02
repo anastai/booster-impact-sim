@@ -112,10 +112,12 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
         if lift > max_lift:
             max_lift = lift
 
-        # ── PN guidance (active throughout flight when speed > threshold) ──
-        if spd > 0.01 and state.mass > 0:
-            cd_now_drag = params.cd if state.engine_on else params.cd_fall
-            a_drag_t = -(0.5 * rho * spd * spd * Aref * cd_now_drag) / state.mass
+        # ── PN guidance (terminal phase: post-burnout only) ───────────────
+        # During powered flight the booster follows the gravity turn to build
+        # up altitude and kinetic energy. Activating PN earlier would
+        # continuously pitch the nose toward the ground target and destroy range.
+        if not state.engine_on and spd > 0.01 and state.mass > 0:
+            a_drag_t = -(0.5 * rho * spd * spd * Aref * params.cd_fall) / state.mass
             a_zem = lateral_accel_command(
                 state.x, state.y, state.h,
                 spd, state.gamma_v, state.gamma_h,
