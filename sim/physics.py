@@ -1,21 +1,39 @@
 """
-Physical constants, parameter / state dataclasses, and one integration step.
+Physical constants, parameter / state dataclasses, and one velocity-frame
+integration step.
 
 Integration scheme
 ------------------
-Semi-implicit (symplectic) Euler — velocities are updated first, then
-positions use the *new* velocities.  This matches the JavaScript reference
-implementation and conserves energy better than plain forward Euler.
+Forward-Euler (dt = 0.2 s), matching the JavaScript reference implementation.
+
+Velocity frame
+--------------
+State is tracked as (v, gamma_v, gamma_h, h, x, y) where:
+  v         – total speed (m/s)
+  gamma_v   – flight-path angle from horizontal (rad), positive = climbing
+  gamma_h   – heading azimuth (rad), 0 = North, π/2 = East
+  h, x, y   – altitude, north, east in the inertial frame (m)
+
+The three orthogonal velocity-frame axes are:
+  ê_t   – along the velocity vector
+  ê_nV  – normal, in the pitch plane (perpendicular to v, pointing "above" v)
+  ê_nH  – lateral / yaw  (ê_t × ê_nV, right-hand rule)
+
+Equations of motion
+-------------------
+  m · (dv/dt)               = T_t  − D  − m·g·sin(γV)  + m·a_cmd_t
+  m · v · (dγV/dt)          = T_nV + L  − m·g·cos(γV)  + m·a_cmd_nV + m·a_zem_nV
+  m · v · cos(γV) · (dγH/dt)= T_nH               + m·a_cmd_nH + m·a_zem_nH
 """
 import math
 from dataclasses import dataclass
 
-G0 = 9.80665        # standard gravity (m/s²)
+G0 = 9.80665        # standard gravity  (m/s²)
 RE = 6_371_000.0    # Earth mean radius (m)
 
 
 # ---------------------------------------------------------------------------
-# Input parameters (user-friendly units — converted to SI inside simulate())
+# Input parameters
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -23,43 +41,73 @@ class Params:
     """
     All user-facing simulation parameters.
 
-    Angles in degrees, distances in km, forces in kN, accelerations in g.
-    simulate() converts everything to SI internally.
+    Angles in degrees, distances in km, forces in kN, accelerations in m/s²
+    (except a_lat_max which is in g).  simulate() converts to SI internally.
     """
-    m_prop:       float = 5_000.0   # propellant mass          (kg)
-    m_str:        float = 800.0     # booster dry mass          (kg)
-    isp:          float = 260.0     # specific impulse          (s)
-    thrust_kn:    float = 120.0     # thrust                    (kN)
-    burn_max:     float = 60.0      # max burn duration         (s)
-    cd:           float = 0.4       # drag coeff – powered
-    cd_fall:      float = 1.2       # drag coeff – tumbling (post-burnout)
-    cd_ctrl:      float = 0.3       # actuator drag coefficient
-    diam:         float = 1.2       # reference diameter        (m)
+    # ── Booster ──────────────────────────────────────────────────────────
+    m_pay:        float = 300.0     # payload mass                (kg)
+    m_prop:       float = 5_000.0   # propellant mass             (kg)
+    m_str:        float = 800.0     # booster structural dry mass (kg)
+    # ── Motor ────────────────────────────────────────────────────────────
+    isp:          float = 260.0     # specific impulse            (s)
+    thrust_kn:    float = 120.0     # thrust                      (kN)
+    burn_max:     float = 60.0      # max burn duration           (s)
+    # ── Aerodynamics ─────────────────────────────────────────────────────
+    cd:           float = 0.4       # drag coeff – powered ascent
+    cd_fall:      float = 1.2       # drag coeff – tumbling post-burnout
+    cl:           float = 0.0       # lift coefficient  (NEW — v2.0)
+    cd_ctrl:      float = 0.3       # actuator drag coefficient (ZEM guidance)
+    diam:         float = 1.2       # reference body diameter     (m)
     atm:          str   = 'isa'     # atmosphere: 'isa' | 'exp' | 'none'
-    launch_angle: float = 75.0      # elevation angle           (deg)
-    x_target:     float = 100.0     # target downrange          (km)
-    y_target:     float = 0.0       # target crossrange         (km)
-    z_target:     float = 0.0       # target altitude           (km, + above / - below launch)
-    a_lat_max:    float = 1.0       # max lateral acceleration  (g)
+    # ── Launch angles ────────────────────────────────────────────────────
+    launch_angle:    float = 75.0   # initial flight-path angle γV₀   (deg)
+    launch_azimuth:  float = 90.0   # initial heading azimuth   γH₀   (deg, 0=N, 90=E)  (NEW)
+    # ── Velocity-frame dynamics ───────────────────────────────────────────
+    grav_turn:       bool  = True    # True → thrust ∥ ê_t; False → fixed body angle  (NEW)
+    grav_turn_v_min: float = 30.0   # speed threshold to activate gravity-turn rotation (m/s)
+                                     # Below this, angle is held fixed even when grav_turn=True.
+                                     # Matches real-rocket "fly straight until minimum speed" logic.
+    a_cmd_t:      float = 0.0       # constant tangential    cmd  (m/s²)  (NEW)
+    a_cmd_nv:     float = 0.0       # constant pitch-normal  cmd  (m/s²)  (NEW)
+    a_cmd_nh:     float = 0.0       # constant yaw-normal    cmd  (m/s²)  (NEW)
+    # ── ZEM guidance target ──────────────────────────────────────────────
+    x_target:     float = 100.0     # target downrange   (km)
+    y_target:     float = 0.0       # target crossrange  (km)
+    z_target:     float = 0.0       # target altitude    (km)
+    a_lat_max:    float = 1.0       # max ZEM lateral accel limit  (g)
 
 
 # ---------------------------------------------------------------------------
-# Simulation state
+# Simulation state  —  velocity-frame primary quantities
 # ---------------------------------------------------------------------------
 
 @dataclass
 class State:
-    """Booster state at one instant in time."""
-    x:              float = 0.0     # downrange position  (m)
-    y:              float = 0.0     # crossrange position (m)
-    h:              float = 0.0     # altitude            (m)
-    vx:             float = 0.0     # downrange velocity  (m/s)
-    vy:             float = 0.0     # crossrange velocity (m/s)
-    vh:             float = 0.0     # vertical velocity   (m/s)
-    mass:           float = 0.0     # current total mass  (kg)
-    t:              float = 0.0     # elapsed time        (s)
+    """
+    Booster state at one instant.
+
+    Primary integration variables are in the velocity frame (v, gamma_v,
+    gamma_h).  Inertial velocity components are derived via vel_inertial().
+    """
+    v:              float = 0.0   # total speed          (m/s)
+    gamma_v:        float = 0.0   # flight-path angle    (rad)
+    gamma_h:        float = 0.0   # heading azimuth      (rad)
+    h:              float = 0.0   # altitude             (m)
+    x:              float = 0.0   # north displacement   (m)
+    y:              float = 0.0   # east displacement    (m)
+    mass:           float = 0.0   # current total mass   (kg)
+    t:              float = 0.0   # elapsed time         (s)
     engine_on:      bool  = True
-    prop_remaining: float = 0.0     # propellant left to burn (kg)
+    prop_remaining: float = 0.0   # propellant left      (kg)
+
+    def vel_inertial(self) -> tuple:
+        """Return (vx, vy, vh) — velocity components in the inertial frame."""
+        vH = self.v * math.cos(self.gamma_v)
+        return (
+            vH * math.cos(self.gamma_h),   # vx – north
+            vH * math.sin(self.gamma_h),   # vy – east
+            self.v * math.sin(self.gamma_v) # vh – up
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -68,14 +116,18 @@ class State:
 
 @dataclass
 class StepLog:
-    """Forces and derived scalars computed at one timestep."""
-    thr:       float = 0.0   # engine thrust        (N)
-    drag_aero: float = 0.0   # aerodynamic drag     (N)
-    drag_ctrl: float = 0.0   # actuator/control drag(N)
-    acc:       float = 0.0   # total |acceleration| (m/s²)
-    aLat_x:    float = 0.0   # lateral accel x      (m/s²)
-    aLat_y:    float = 0.0   # lateral accel y      (m/s²)
-    aLat_mag:  float = 0.0   # lateral accel |mag|  (m/s²)
+    """Forces and derived scalars at one timestep."""
+    thr:         float = 0.0   # engine thrust         (N)
+    drag_aero:   float = 0.0   # aerodynamic drag      (N)
+    lift:        float = 0.0   # aerodynamic lift      (N)   NEW
+    drag_ctrl:   float = 0.0   # actuator / ZEM drag   (N)
+    acc:         float = 0.0   # |total acceleration|  (m/s²)
+    gamma_v_deg: float = 0.0   # flight-path angle     (deg) NEW
+    gamma_h_deg: float = 0.0   # heading azimuth       (deg) NEW
+    aLat_x:      float = 0.0
+    aLat_y:      float = 0.0
+    aLat_z:      float = 0.0
+    aLat_mag:    float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -88,66 +140,112 @@ def gravity(h: float) -> float:
 
 
 def integrate_step(
-    state: State,
-    a_lat: tuple[float, float, float],
-    thrust_n: float,
-    drag_tot: float,
-    grav: float,
-    launch_angle_rad: float,
-    dt: float,
-) -> tuple[State, float]:
+    state:     State,
+    params:    Params,
+    thrust_n:  float,
+    drag_aero: float,
+    lift:      float,
+    drag_ctrl: float,
+    grav:      float,
+    a_zem:     tuple,
+    dt:        float,
+) -> tuple:
     """
-    Advance the booster state by one timestep dt (s).
+    Advance the booster state by one timestep dt using velocity-frame ODEs.
 
-    Parameters
-    ----------
-    state            : current booster state
-    a_lat            : lateral acceleration command (ax, ay, az) in m/s²
-    thrust_n         : engine thrust magnitude (N); 0 after burnout
-    drag_tot         : total drag force magnitude (N)
-    grav             : local gravity (m/s²)
-    launch_angle_rad : fixed thrust elevation angle (rad)
-    dt               : timestep (s)
+    Thrust decomposition
+    --------------------
+    grav_turn = True  → T_t = F, T_nV = T_nH = 0  (thrust ∥ velocity)
+    grav_turn = False → body held at (launch_angle, launch_azimuth);
+                        α = γV₀ − γV is the angle-of-attack in the pitch plane
+                        T_t  = F·cos(α)
+                        T_nV = F·sin(α)
+
+    ZEM projection
+    --------------
+    The ZEM guidance returns a command in the inertial frame (ax, ay, az).
+    It is projected onto the velocity-frame normal axes ê_nV and ê_nH before
+    entering the dγV/dt and dγH/dt equations.
 
     Returns
     -------
-    new_state        : booster state at t + dt
-    acc_mag          : total acceleration magnitude (m/s²) — for logging
+    (new_state, acc_mag)
     """
-    spd    = math.sqrt(state.vx**2 + state.vy**2 + state.vh**2)
-    aLat_x, aLat_y, aLat_z = a_lat
+    v, gV, gH = state.v, state.gamma_v, state.gamma_h
+    spd = max(v, 1e-6)
 
-    # Thrust components (fixed launch direction, x-z plane only)
-    thr_x = thrust_n * math.cos(launch_angle_rad)
-    thr_z = thrust_n * math.sin(launch_angle_rad)
-
-    # Drag components opposing velocity
-    if spd > 0.01:
-        drag_x = drag_tot * state.vx / spd
-        drag_y = drag_tot * state.vy / spd
-        drag_z = drag_tot * state.vh / spd
+    # ── Thrust in velocity frame ───────────────────────────────────────────
+    if params.grav_turn:
+        T_t, T_nV, T_nH = thrust_n, 0.0, 0.0
     else:
-        drag_x = drag_y = drag_z = 0.0
+        gV0   = math.radians(params.launch_angle)
+        alpha = gV0 - gV           # angle of attack (pitch plane)
+        T_t   = thrust_n * math.cos(alpha)
+        T_nV  = thrust_n * math.sin(alpha)
+        T_nH  = 0.0
 
-    # Net acceleration components
-    ax = (thr_x - drag_x) / state.mass + aLat_x
-    ay = (      - drag_y) / state.mass + aLat_y
-    az = (thr_z - drag_z) / state.mass - grav + aLat_z
+    # ── ZEM command projected onto ê_nV and ê_nH ──────────────────────────
+    # ê_nV inertial components: [−sin(γV)cos(γH), −sin(γV)sin(γH), cos(γV)]
+    # ê_nH inertial components: [−sin(γH),          cos(γH),         0    ]
+    ax_z, ay_z, az_z = a_zem
+    a_zem_nV = (-ax_z * math.sin(gV) * math.cos(gH)
+                -ay_z * math.sin(gV) * math.sin(gH)
+                +az_z * math.cos(gV))
+    a_zem_nH = -ax_z * math.sin(gH) + ay_z * math.cos(gH)
 
-    # Semi-implicit Euler: update velocity first, then position with new velocity
-    new_vx = state.vx + ax * dt
-    new_vy = state.vy + ay * dt
-    new_vh = state.vh + az * dt
+    drag_tot = drag_aero + drag_ctrl
+
+    # ── Velocity-frame ODEs ────────────────────────────────────────────────
+    dv_dt  = (T_t - drag_tot) / state.mass - grav * math.sin(gV) + params.a_cmd_t
+
+    # Only apply pitch/yaw rotation when above minimum speed.
+    # Below grav_turn_v_min (in grav-turn mode) the body angle is held fixed,
+    # matching real-rocket practice of flying straight off the rail first.
+    rotation_active = spd > (params.grav_turn_v_min if params.grav_turn else 0.5)
+
+    if rotation_active:
+        dgV_dt = ((T_nV + lift) / (state.mass * spd)
+                  - grav * math.cos(gV) / spd
+                  + params.a_cmd_nv / spd
+                  + a_zem_nV / spd)
+
+        vcos_gV = spd * math.cos(gV)
+        if abs(vcos_gV) > 0.5:
+            dgH_dt = (T_nH / (state.mass * vcos_gV)
+                      + params.a_cmd_nh / vcos_gV
+                      + a_zem_nH / vcos_gV)
+        else:
+            dgH_dt = 0.0
+    else:
+        dgV_dt = 0.0
+        dgH_dt = 0.0
+
+    if not rotation_active:
+        dgV_dt = 0.0
+        dgH_dt = 0.0
+
+    # ── Forward-Euler integration ──────────────────────────────────────────
+    new_v  = max(0.0, v + dv_dt * dt)
+    new_gV = gV + dgV_dt * dt
+    new_gV = max(-math.pi / 2 + 1e-4, min(math.pi / 2 - 1e-4, new_gV))
+    new_gH = gH + dgH_dt * dt
+
+    # ── Position update (inertial frame) ──────────────────────────────────
+    new_h = state.h + new_v * math.sin(new_gV) * dt
+    new_x = state.x + new_v * math.cos(new_gV) * math.cos(new_gH) * dt
+    new_y = state.y + new_v * math.cos(new_gV) * math.sin(new_gH) * dt
 
     new_state = State(
-        x=state.x + new_vx * dt,
-        y=state.y + new_vy * dt,
-        h=state.h + new_vh * dt,
-        vx=new_vx, vy=new_vy, vh=new_vh,
-        mass=state.mass,
-        t=state.t + dt,
+        v=new_v, gamma_v=new_gV, gamma_h=new_gH,
+        h=new_h, x=new_x, y=new_y,
+        mass=state.mass, t=state.t + dt,
         engine_on=state.engine_on,
         prop_remaining=state.prop_remaining,
     )
-    acc_mag = math.sqrt(ax**2 + ay**2 + az**2)
+
+    acc_mag = math.sqrt(
+        dv_dt**2
+        + (v * dgV_dt)**2
+        + (v * math.cos(gV) * dgH_dt)**2
+    )
     return new_state, acc_mag
