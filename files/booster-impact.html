@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Satellite Launcher — Booster Impact Tracker</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, sans-serif; background: #f5f5f2; color: #1a1a1a; padding: 1.5rem; }
+h1 { font-size: 22px; font-weight: 500; margin-bottom: 4px; }
+.sub { font-size: 13px; color: #666; margin-bottom: 1.2rem; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+.grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+.gridM { display: grid; grid-template-columns: repeat(6, minmax(0,1fr)); gap: 10px; margin-bottom: 12px; }
+.card { background: #fff; border: 0.5px solid rgba(0,0,0,0.12); border-radius: 12px; padding: 1rem 1.25rem; }
+.slabel { font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.08em; color: #999; margin-bottom: 10px; }
+.pr { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
+.pl { font-size: 12px; color: #555; min-width: 148px; }
+.pv { font-size: 12px; font-weight: 500; min-width: 60px; text-align: right; }
+.mc { background: #f0efe8; border-radius: 8px; padding: 0.75rem 1rem; }
+.ml { font-size: 11px; color: #777; margin-bottom: 4px; }
+.mv { font-size: 19px; font-weight: 500; }
+.mu { font-size: 11px; color: #999; }
+.rbtn { width: 100%; padding: 10px; font-size: 14px; font-weight: 500; background: #fff; border: 0.5px solid rgba(0,0,0,0.25); border-radius: 8px; cursor: pointer; margin-top: 10px; transition: background 0.15s; }
+.rbtn:hover { background: #f5f5f2; }
+.tabs { display: flex; gap: 4px; margin-bottom: 10px; flex-wrap: wrap; }
+.tab { font-size: 12px; padding: 4px 10px; border-radius: 8px; border: 0.5px solid rgba(0,0,0,0.12); cursor: pointer; color: #666; background: transparent; }
+.tab.active { background: #f0efe8; color: #1a1a1a; border-color: rgba(0,0,0,0.2); }
+.chart-wrap { position: relative; width: 100%; height: 300px; }
+select { font-size: 12px; padding: 4px 8px; border-radius: 8px; border: 0.5px solid rgba(0,0,0,0.15); background: #fff; flex: 1; }
+.impact-box { margin-top: 10px; padding: 10px 14px; border-radius: 8px; border: 0.5px solid rgba(0,0,0,0.12); background: #fdf3ef; font-size: 12px; color: #555; display: none; }
+.impact-box.show { display: block; }
+.impact-box strong { color: #D85A30; font-weight: 500; }
+/* velocity-frame badge */
+.vf-badge { display: inline-block; font-size: 10px; font-weight: 600; letter-spacing: 0.06em;
+  background: #e8f0fe; color: #3a6bc8; border-radius: 5px; padding: 1px 6px; margin-left: 6px; vertical-align: middle; }
+.chk-row { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
+.chk-row label { font-size: 12px; color: #555; cursor: pointer; }
+input[type=checkbox] { width: 14px; height: 14px; accent-color: #3a6bc8; cursor: pointer; }
+.divider { border: none; border-top: 0.5px solid rgba(0,0,0,0.08); margin: 8px 0; }
+/* frame legend box */
+.frame-box { background: #f0efe8; border-radius: 8px; padding: 0.6rem 0.9rem; margin-bottom: 8px; font-size: 11px; color: #555; line-height: 1.7; }
+.frame-box b { color: #1a1a1a; }
+</style>
+</head>
+<body>
+
+<h1>Satellite Launcher — Booster Impact Tracker <span class="vf-badge">Velocity Frame</span></h1>
+<p class="sub">Velocity-frame dynamics · gravity turn · lift &amp; drag in body/wind frame · 3-D heading</p>
+
+<!-- ── Coordinate frame info ─────────────────────────────────────────── -->
+<div class="frame-box">
+  <b>Velocity-frame axes:</b>
+  &nbsp; <b>ê<sub>t</sub></b> along velocity vector &nbsp;|&nbsp;
+  <b>ê<sub>nV</sub></b> normal, in pitch plane (⊥ v, upward) &nbsp;|&nbsp;
+  <b>ê<sub>nH</sub></b> normal, lateral (yaw plane) &nbsp;·&nbsp;
+  <b>γ<sub>V</sub></b> = flight-path angle from horizontal &nbsp;·&nbsp;
+  <b>γ<sub>H</sub></b> = heading azimuth
+</div>
+
+<div class="grid3">
+  <!-- ── Card 1: Booster ── -->
+  <div class="card">
+    <div class="slabel">Booster parameters</div>
+    <div class="pr">
+      <span class="pl">Payload mass (kg)</span>
+      <input type="range" min="50" max="2000" step="50" value="300" id="mPay" style="flex:1" oninput="u('mPay','vPay',v=>v+' kg')">
+      <span class="pv" id="vPay">300 kg</span>
+    </div>
+    <div class="pr">
+      <span class="pl">Propellant mass (kg)</span>
+      <input type="range" min="500" max="30000" step="500" value="5000" id="mProp" style="flex:1" oninput="u('mProp','vProp',v=>v+' kg')">
+      <span class="pv" id="vProp">5000 kg</span>
+    </div>
+    <div class="pr">
+      <span class="pl">Structural mass (kg)</span>
+      <input type="range" min="200" max="5000" step="100" value="800" id="mStr" style="flex:1" oninput="u('mStr','vStr',v=>v+' kg')">
+      <span class="pv" id="vStr">800 kg</span>
+    </div>
+    <hr class="divider">
+    <div class="slabel">Motor</div>
+    <div class="pr">
+      <span class="pl">Specific impulse (s)</span>
+      <input type="range" min="200" max="420" step="5" value="260" id="isp" style="flex:1" oninput="u('isp','vIsp',v=>v+' s')">
+      <span class="pv" id="vIsp">260 s</span>
+    </div>
+    <div class="pr">
+      <span class="pl">Thrust (kN)</span>
+      <input type="range" min="20" max="800" step="10" value="120" id="thrust" style="flex:1" oninput="u('thrust','vThrust',v=>v+' kN')">
+      <span class="pv" id="vThrust">120 kN</span>
+    </div>
+    <div class="pr">
+      <span class="pl">Burn duration (s)</span>
+      <input type="range" min="10" max="300" step="5" value="60" id="burnTime" style="flex:1" oninput="u('burnTime','vBurn',v=>v+' s')">
+      <span class="pv" id="vBurn">60 s</span>
+    </div>
+  </div>
+
+  <!-- ── Card 2: Aero ── -->
+  <div class="card">
+    <div class="slabel">Aerodynamics &amp; atmosphere</div>
+    <div class="pr">
+      <span class="pl">Drag coeff. C<sub>D</sub></span>
+      <input type="range" min="0.1" max="1.2" step="0.05" value="0.4" id="cd" style="flex:1" oninput="u('cd','vCd',v=>parseFloat(v).toFixed(2))">
+      <span class="pv" id="vCd">0.40</span>
+    </div>
+    <div class="pr">
+      <span class="pl">Lift coeff. C<sub>L</sub></span>
+      <input type="range" min="0" max="1.5" step="0.05" value="0" id="cl" style="flex:1" oninput="u('cl','vCl',v=>parseFloat(v).toFixed(2))">
+      <span class="pv" id="vCl">0.00</span>
+    </div>
+    <div class="pr">
+      <span class="pl">Ref. diameter (m)</span>
+      <input type="range" min="0.3" max="4" step="0.1" value="1.2" id="diam" style="flex:1" oninput="u('diam','vDiam',v=>parseFloat(v).toFixed(1)+' m')">
+      <span class="pv" id="vDiam">1.2 m</span>
+    </div>
+    <div class="pr">
+      <span class="pl">Post-burnout C<sub>D</sub></span>
+      <input type="range" min="0.5" max="3.0" step="0.1" value="1.2" id="cdFall" style="flex:1" oninput="u('cdFall','vCdFall',v=>parseFloat(v).toFixed(1)+' (tumbling)')">
+      <span class="pv" id="vCdFall">1.2 (tumbling)</span>
+    </div>
+    <div class="pr">
+      <span class="pl">Atmosphere model</span>
+      <select id="atm">
+        <option value="isa" selected>ISA standard</option>
+        <option value="exp">Exponential</option>
+        <option value="none">Vacuum</option>
+      </select>
+    </div>
+    <hr class="divider">
+    <div class="slabel">Trajectory &amp; launch</div>
+    <div class="pr">
+      <span class="pl">Launch angle γ<sub>V₀</sub> (°)</span>
+      <input type="range" min="30" max="90" step="1" value="75" id="angle" style="flex:1" oninput="u('angle','vAngle',v=>v+'°')">
+      <span class="pv" id="vAngle">75°</span>
+    </div>
+    <div class="pr">
+      <span class="pl">Launch azimuth γ<sub>H₀</sub> (°)</span>
+      <input type="range" min="0" max="359" step="1" value="90" id="azimuth" style="flex:1" oninput="u('azimuth','vAzimuth',v=>v+'°')">
+      <span class="pv" id="vAzimuth">90°</span>
+    </div>
+    <div class="pr">
+      <span class="pl">Launch latitude (°)</span>
+      <input type="range" min="-45" max="45" step="1" value="28" id="lat" style="flex:1" oninput="u('lat','vLat',v=>v+'°')">
+      <span class="pv" id="vLat">28°</span>
+    </div>
+  </div>
+
+  <!-- ── Card 3: Velocity-frame guidance ── -->
+  <div class="card">
+    <div class="slabel">Velocity-frame dynamics</div>
+
+    <div class="chk-row">
+      <input type="checkbox" id="gravTurn" checked>
+      <label for="gravTurn">Gravity turn <span style="color:#999;font-size:11px">(thrust ∥ velocity)</span></label>
+    </div>
+    <div style="font-size:11px;color:#888;margin:-4px 0 10px 22px;line-height:1.5;">
+      OFF → thrust at fixed body angle γ<sub>V₀</sub>
+    </div>
+
+    <hr class="divider">
+    <div class="slabel">Accel. commands — velocity frame</div>
+    <div style="font-size:11px;color:#888;margin:-4px 0 8px 0;line-height:1.5;">
+      Applied throughout flight (m/s²). Used for pitch/yaw guidance or lateral divert.
+    </div>
+
+    <div class="pr">
+      <span class="pl">a<sub>t</sub> — tangential (ê<sub>t</sub>)</span>
+      <input type="range" min="-10" max="10" step="0.5" value="0" id="aCmdT" style="flex:1" oninput="u('aCmdT','vACmdT',v=>(parseFloat(v)>=0?'+':'')+parseFloat(v).toFixed(1)+' m/s²')">
+      <span class="pv" id="vACmdT">+0.0 m/s²</span>
+    </div>
+    <div class="pr">
+      <span class="pl">a<sub>nV</sub> — normal pitch (ê<sub>nV</sub>)</span>
+      <input type="range" min="-10" max="10" step="0.5" value="0" id="aCmdNV" style="flex:1" oninput="u('aCmdNV','vACmdNV',v=>(parseFloat(v)>=0?'+':'')+parseFloat(v).toFixed(1)+' m/s²')">
+      <span class="pv" id="vACmdNV">+0.0 m/s²</span>
+    </div>
+    <div class="pr">
+      <span class="pl">a<sub>nH</sub> — normal yaw (ê<sub>nH</sub>)</span>
+      <input type="range" min="-5" max="5" step="0.25" value="0" id="aCmdNH" style="flex:1" oninput="u('aCmdNH','vACmdNH',v=>(parseFloat(v)>=0?'+':'')+parseFloat(v).toFixed(2)+' m/s²')">
+      <span class="pv" id="vACmdNH">+0.00 m/s²</span>
+    </div>
+
+    <button class="rbtn" onclick="run()">Run simulation</button>
+  </div>
+</div>
+
+<!-- ── Metric cards ───────────────────────────────────────────────────── -->
+<div class="gridM">
+  <div class="mc"><div class="ml">Max altitude</div><div class="mv" id="mAlt">—</div><div class="mu">km</div></div>
+  <div class="mc"><div class="ml">Max velocity</div><div class="mv" id="mVel">—</div><div class="mu">m/s</div></div>
+  <div class="mc"><div class="ml">Burnout altitude</div><div class="mv" id="mBurnH">—</div><div class="mu">km</div></div>
+  <div class="mc"><div class="ml">Impact range</div><div class="mv" id="mImpact">—</div><div class="mu">km downrange</div></div>
+  <div class="mc"><div class="ml">γ<sub>V</sub> at burnout</div><div class="mv" id="mBurnGV">—</div><div class="mu">deg</div></div>
+  <div class="mc"><div class="ml">Max lift</div><div class="mv" id="mLift">—</div><div class="mu">kN</div></div>
+</div>
+
+<div class="impact-box" id="impactBox">
+  Booster impact: <strong id="impactDetail">—</strong>
+</div>
+
+<div class="card" style="margin-top:12px">
+  <div class="tabs">
+    <button class="tab active" onclick="sc(0)">Trajectory</button>
+    <button class="tab" onclick="sc(1)">Altitude</button>
+    <button class="tab" onclick="sc(2)">Velocity</button>
+    <button class="tab" onclick="sc(3)">Forces</button>
+    <button class="tab" onclick="sc(4)">Acceleration</button>
+    <button class="tab" onclick="sc(5)">Flight angles γ</button>
+  </div>
+  <div class="chart-wrap"><canvas id="ch"></canvas></div>
+</div>
+
+<script>
+/* ── helpers ─────────────────────────────────────────────────────────── */
+function u(id, out, fmt) {
+  document.getElementById(out).textContent = fmt(document.getElementById(id).value);
+}
+
+const G0 = 9.80665, RE = 6371000;
+
+function getAtmos(type, h) {
+  if (type === 'none') return { rho: 0 };
+  if (type === 'exp')  return { rho: 1.225 * Math.exp(-h / 8500) };
+  if (h > 86000) return { rho: 0 };
+  if (h > 20000) { const T=216.65, p=5474.89*Math.exp(-G0*(h-20000)/(287*T)); return {rho:p/(287*T)}; }
+  if (h > 11000) { const T=216.65, p=22632.1*Math.exp(-G0*(h-11000)/(287*T)); return {rho:p/(287*T)}; }
+  const T=288.15-0.0065*h, p=101325*Math.pow(T/288.15,5.2561); return {rho:p/(287*T)};
+}
+
+let SD = null, ci = null, ct = 0;
+
+/* ── main simulation ─────────────────────────────────────────────────── */
+/*
+  STATE in velocity frame:
+    v      – total speed (m/s)
+    gammaV – flight-path angle from horizontal (rad)  positive = climbing
+    gammaH – heading azimuth (rad)  0 = North, π/2 = East
+    h      – altitude (m)
+    x      – northing (m)
+    y      – easting  (m)
+
+  VELOCITY-FRAME AXES:
+    ê_t   – along velocity vector
+    ê_nV  – normal, in pitch plane (perp to v, pointing "up" from v)
+    ê_nH  – lateral / yaw (ê_t × ê_nV)
+
+  EQUATIONS OF MOTION:
+    m·(dv/dt)           = T_t  − D  − m·g·sin(γV)  +  m·a_t_cmd
+    m·v·(dγV/dt)        = T_nV + L  − m·g·cos(γV)  +  m·a_nV_cmd
+    m·v·cos(γV)·(dγH/dt)= T_nH                      +  m·a_nH_cmd
+
+  THRUST DECOMPOSITION:
+    Gravity-turn mode  → thrust ∥ ê_t  (T_t=F, T_nV=T_nH=0)
+    Fixed-angle mode   → body stays at (γV₀, γH₀); decompose into velocity frame
+      α  = γV₀ − γV   (angle of attack in pitch plane)
+      T_t  = F·cos(α)
+      T_nV = F·sin(α)   (positive pulls nose toward γV₀)
+      T_nH = 0
+
+  POSITION INTEGRATION (inertial frame):
+    ḣ = v·sin(γV)
+    ẋ = v·cos(γV)·cos(γH)   (north)
+    ẏ = v·cos(γV)·sin(γH)   (east)
+*/
+function run() {
+  const mPay    = +document.getElementById('mPay').value;
+  const mProp   = +document.getElementById('mProp').value;
+  const mStr    = +document.getElementById('mStr').value;
+  const isp     = +document.getElementById('isp').value;
+  const thrustN = +document.getElementById('thrust').value * 1000;
+  const burnMax = +document.getElementById('burnTime').value;
+  const cd      = +document.getElementById('cd').value;
+  const cdFall  = +document.getElementById('cdFall').value;
+  const cl      = +document.getElementById('cl').value;
+  const diam    = +document.getElementById('diam').value;
+  const atmT    = document.getElementById('atm').value;
+  const gV0     = +document.getElementById('angle').value   * Math.PI / 180; // initial γV
+  const gH0     = +document.getElementById('azimuth').value * Math.PI / 180; // initial γH
+  const gravTurn = document.getElementById('gravTurn').checked;
+  const aCmdT   = +document.getElementById('aCmdT').value;   // tangential cmd (m/s²)
+  const aCmdNV  = +document.getElementById('aCmdNV').value;  // pitch-normal cmd (m/s²)
+  const aCmdNH  = +document.getElementById('aCmdNH').value;  // yaw-normal  cmd (m/s²)
+
+  const Aref     = Math.PI * (diam / 2) ** 2;
+  const mdot     = thrustN / (isp * G0);
+  const propUsed = Math.min(mProp, mdot * burnMax);
+
+  /* state */
+  let v = 0, gammaV = gV0, gammaH = gH0;
+  let h = 0, x = 0, y = 0, t = 0;
+  let mass = mPay + mProp + mStr;
+  let prop = propUsed, engineOn = true;
+  let burnoutH = 0, burnoutT = 0, burnoutGV = gV0;
+  let maxH = 0, maxV = 0, maxLift = 0;
+
+  const dt = 0.2;
+  const tA=[],hA=[],vA=[],xA=[],gVA=[],gHA=[],dragA=[],liftA=[],thrA=[],accA=[];
+
+  for (let i = 0; i < 60000; i++) {
+    /* atmosphere & aero */
+    const rho  = getAtmos(atmT, h).rho;
+    const q    = 0.5 * rho * v * v;           // dynamic pressure (Pa)
+    const cdNow= engineOn ? cd : cdFall;
+    const drag = q * cdNow * Aref;            // drag force (N), opposes ê_t
+    const lift = q * cl    * Aref;            // lift force (N), along ê_nV
+
+    /* gravity */
+    const g = G0 * Math.pow(RE / (RE + h), 2);
+
+    /* thrust */
+    let thr = 0;
+    if (engineOn && prop > 0) {
+      thr = thrustN;
+      prop -= mdot * dt;
+      mass -= mdot * dt;
+      if (prop <= 0 || t >= burnMax) {
+        engineOn = false;
+        burnoutH = h; burnoutT = t; burnoutGV = gammaV;
+        mass = mPay + mStr + (mProp - propUsed);
+      }
+    }
+
+    /* thrust components in velocity frame */
+    let T_t, T_nV, T_nH;
+    if (gravTurn) {
+      /* thrust ∥ velocity (perfect gravity turn) */
+      T_t  = thr;
+      T_nV = 0;
+      T_nH = 0;
+    } else {
+      /* body held at initial angles (gV0, gH0); decompose into velocity frame */
+      const alpha = gV0 - gammaV;   // angle of attack (pitch plane)
+      T_t  = thr * Math.cos(alpha);
+      T_nV = thr * Math.sin(alpha);
+      T_nH = 0;
+    }
+
+    /* equations of motion in velocity frame */
+    const dv_dt = (T_t - drag) / mass - g * Math.sin(gammaV) + aCmdT;
+
+    let dgV_dt = 0, dgH_dt = 0;
+    if (v > 0.5) {
+      /* pitch: gravity rotates flight path downward; lift & T_nV rotate it up */
+      dgV_dt = (T_nV + lift) / (mass * v) - g * Math.cos(gammaV) / v + aCmdNV / v;
+
+      /* yaw: driven by lateral thrust or heading command */
+      const vCosGV = v * Math.cos(gammaV);
+      if (Math.abs(vCosGV) > 0.5) {
+        dgH_dt = T_nH / (mass * vCosGV) + aCmdNH / vCosGV;
+      }
+    }
+
+    /* integrate velocity-frame state */
+    v      += dv_dt  * dt;  if (v < 0) v = 0;
+    gammaV += dgV_dt * dt;
+    /* clamp gammaV to avoid numerical blow-up at vertical */
+    gammaV  = Math.max(-Math.PI / 2 + 0.001, Math.min(Math.PI / 2 - 0.001, gammaV));
+    gammaH += dgH_dt * dt;
+
+    /* position update (inertial frame) */
+    h += v * Math.sin(gammaV)                   * dt;
+    x += v * Math.cos(gammaV) * Math.cos(gammaH)* dt;
+    y += v * Math.cos(gammaV) * Math.sin(gammaH)* dt;
+    t += dt;
+
+    if (h < 0) { h = 0; break; }
+    if (h > maxH) maxH = h;
+    if (v > maxV) maxV = v;
+    if (lift > maxLift) maxLift = lift;
+
+    if (i % 5 === 0) {
+      tA .push(+t.toFixed(1));
+      hA .push(+(h / 1000).toFixed(2));
+      vA .push(+v.toFixed(1));
+      xA .push(+(Math.sqrt(x*x + y*y) / 1000).toFixed(2));
+      gVA.push(+(gammaV * 180 / Math.PI).toFixed(2));
+      gHA.push(+(gammaH * 180 / Math.PI).toFixed(2));
+      dragA.push(+(drag / 1000).toFixed(2));
+      liftA.push(+(lift / 1000).toFixed(2));
+      thrA .push(+(thr  / 1000).toFixed(2));
+      /* total inertial acceleration magnitude (m/s²) → g units */
+      const a_total = Math.sqrt(dv_dt**2 + (v * dgV_dt)**2 + (v * Math.cos(gammaV) * dgH_dt)**2);
+      accA .push(+(a_total / G0).toFixed(3));
+    }
+  }
+
+  const impactKm = (Math.sqrt(x*x + y*y) / 1000).toFixed(1);
+  document.getElementById('mAlt')    .textContent = (maxH / 1000).toFixed(1);
+  document.getElementById('mVel')    .textContent = maxV.toFixed(0);
+  document.getElementById('mBurnH')  .textContent = (burnoutH / 1000).toFixed(1);
+  document.getElementById('mImpact') .textContent = impactKm;
+  document.getElementById('mBurnGV') .textContent = (burnoutGV * 180 / Math.PI).toFixed(1);
+  document.getElementById('mLift')   .textContent = (maxLift / 1000).toFixed(2);
+
+  const box = document.getElementById('impactBox');
+  box.classList.add('show');
+  document.getElementById('impactDetail').textContent =
+    `${impactKm} km downrange — burnout at ${(burnoutH/1000).toFixed(1)} km alt, `+
+    `t = ${burnoutT.toFixed(0)} s, γV = ${(burnoutGV*180/Math.PI).toFixed(1)}°`;
+
+  SD = { t:tA, h:hA, v:vA, x:xA, gV:gVA, gH:gHA, drag:dragA, lift:liftA, thr:thrA, acc:accA };
+  sc(ct);
+}
+
+/* ── chart renderer ─────────────────────────────────────────────────── */
+function sc(idx) {
+  ct = idx;
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', i===idx));
+  if (!SD) return;
+  if (ci) { ci.destroy(); ci = null; }
+  const gc = 'rgba(0,0,0,0.07)', tc = '#666';
+  const cols = ['#378ADD','#D85A30','#1D9E75','#D4537E','#7F77DD','#E8A020'];
+  const canvas = document.getElementById('ch');
+
+  /* shared axis options */
+  const xTime = { title:{display:true,text:'Time (s)',color:tc}, ticks:{color:tc,maxTicksLimit:10}, grid:{color:gc} };
+
+  /* 0 – Trajectory (altitude vs downrange) */
+  if (idx === 0) {
+    ci = new Chart(canvas, { type:'scatter', data:{ datasets:[{
+      label:'Trajectory', data: SD.x.map((x,i)=>({x, y:SD.h[i]})),
+      borderColor:cols[0], pointRadius:1.5, showLine:true, borderWidth:2
+    }]}, options:{ responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{display:false} },
+      scales:{
+        x:{ title:{display:true,text:'Downrange distance (km)',color:tc}, ticks:{color:tc}, grid:{color:gc} },
+        y:{ title:{display:true,text:'Altitude (km)',color:tc}, ticks:{color:tc}, grid:{color:gc} }
+      }
+    }});
+    return;
+  }
+
+  /* 3 – Forces: thrust, drag, lift */
+  if (idx === 3) {
+    ci = new Chart(canvas, { type:'line', data:{ labels:SD.t, datasets:[
+      { label:'Thrust (kN)', data:SD.thr,  borderColor:cols[1], pointRadius:0, borderWidth:2 },
+      { label:'Drag (kN)',   data:SD.drag, borderColor:cols[3], pointRadius:0, borderWidth:2, borderDash:[5,4] },
+      { label:'Lift (kN)',   data:SD.lift, borderColor:cols[2], pointRadius:0, borderWidth:2, borderDash:[2,3] }
+    ]}, options:{ responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{display:true, labels:{color:tc,boxWidth:10}} },
+      scales:{ x:xTime, y:{ title:{display:true,text:'kN',color:tc}, ticks:{color:tc}, grid:{color:gc} } }
+    }});
+    return;
+  }
+
+  /* 5 – Flight angles γV and γH */
+  if (idx === 5) {
+    ci = new Chart(canvas, { type:'line', data:{ labels:SD.t, datasets:[
+      { label:'γV — flight-path angle (°)', data:SD.gV, borderColor:cols[0], pointRadius:0, borderWidth:2, fill:false },
+      { label:'γH — heading azimuth (°)',   data:SD.gH, borderColor:cols[4], pointRadius:0, borderWidth:2, fill:false, borderDash:[6,4] }
+    ]}, options:{ responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{display:true, labels:{color:tc,boxWidth:10}} },
+      scales:{ x:xTime, y:{ title:{display:true,text:'degrees',color:tc}, ticks:{color:tc}, grid:{color:gc} } }
+    }});
+    return;
+  }
+
+  /* 1,2,4 – single-series line charts */
+  const cfgs = [null,
+    { label:'Altitude (km)',      data:SD.h,   y:'km',  c:cols[0] },
+    { label:'Velocity (m/s)',     data:SD.v,   y:'m/s', c:cols[1] },
+    null,
+    { label:'Acceleration (g)',   data:SD.acc, y:'g',   c:cols[4] },
+    null
+  ];
+  const cfg = cfgs[idx];
+  ci = new Chart(canvas, { type:'line', data:{ labels:SD.t, datasets:[{
+    label:cfg.label, data:cfg.data,
+    borderColor:cfg.c, pointRadius:0, borderWidth:2,
+    fill:true, backgroundColor:cfg.c+'18'
+  }]}, options:{ responsive:true, maintainAspectRatio:false,
+    plugins:{ legend:{display:false} },
+    scales:{ x:xTime, y:{ title:{display:true,text:cfg.y,color:tc}, ticks:{color:tc}, grid:{color:gc} } }
+  }});
+}
+
+run();
+</script>
+</body>
+</html>
