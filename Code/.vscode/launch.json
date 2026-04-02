@@ -1,0 +1,33 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run simulation",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/run.py",
+            "python": "${env:LOCALAPPDATA}/Programs/Python/Python312/python.exe",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Run optimiser",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/optimize.py",
+            "python": "${env:LOCALAPPDATA}/Programs/Python/Python312/python.exe",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Run check vectors (pytest)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["tests/check_vectors.py", "-v"],
+            "python": "${env:LOCALAPPDATA}/Programs/Python/Python312/python.exe",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

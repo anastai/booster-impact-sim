@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Satellite Launcher Simulation</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, sans-serif; background: #f5f5f2; color: #1a1a1a; padding: 1.5rem; }
+h1 { font-size: 22px; font-weight: 500; margin-bottom: 4px; }
+.subtitle { font-size: 13px; color: #666; margin-bottom: 1.5rem; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+.grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 12px; }
+.card { background: #fff; border: 0.5px solid rgba(0,0,0,0.12); border-radius: 12px; padding: 1rem 1.25rem; }
+.section-label { font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.08em; color: #999; margin-bottom: 10px; }
+.param-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.param-label { font-size: 12px; color: #555; min-width: 130px; }
+.param-val { font-size: 12px; font-weight: 500; min-width: 56px; text-align: right; }
+.metric-card { background: #f0efe8; border-radius: 8px; padding: 0.75rem 1rem; }
+.metric-label { font-size: 11px; color: #777; margin-bottom: 4px; }
+.metric-val { font-size: 20px; font-weight: 500; }
+.metric-unit { font-size: 11px; color: #999; }
+.run-btn { width: 100%; padding: 10px; font-size: 14px; font-weight: 500; background: #fff; border: 0.5px solid rgba(0,0,0,0.25); border-radius: 8px; cursor: pointer; margin-top: 12px; transition: background 0.15s; }
+.run-btn:hover { background: #f5f5f2; }
+.tabs { display: flex; gap: 4px; margin-bottom: 10px; flex-wrap: wrap; }
+.tab { font-size: 12px; padding: 4px 10px; border-radius: 8px; border: 0.5px solid rgba(0,0,0,0.12); cursor: pointer; color: #666; background: transparent; }
+.tab.active { background: #f0efe8; color: #1a1a1a; border-color: rgba(0,0,0,0.2); }
+.chart-wrap { position: relative; width: 100%; height: 280px; }
+select, input[type=range] { font-size: 12px; }
+select { padding: 4px 8px; border-radius: 8px; border: 0.5px solid rgba(0,0,0,0.15); background: #fff; width: 100%; }
+</style>
+</head>
+<body>
+
+<h1>Satellite Launcher Simulation</h1>
+<p class="subtitle">Single-stage rocket — configure parameters, run simulation, analyze trajectory</p>
+
+<div class="grid2">
+  <div class="card">
+    <div class="section-label">Rocket configuration</div>
+    <div class="param-row">
+      <span class="param-label">Payload mass (kg)</span>
+      <input type="range" min="100" max="5000" step="100" value="500" id="mPayload" style="flex:1;" oninput="upd('mPayload','mPayloadVal',v=>v+' kg')">
+      <span class="param-val" id="mPayloadVal">500 kg</span>
+    </div>
+    <div class="param-row">
+      <span class="param-label">Propellant mass (kg)</span>
+      <input type="range" min="5000" max="100000" step="1000" value="30000" id="mProp" style="flex:1;" oninput="upd('mProp','mPropVal',v=>v+' kg')">
+      <span class="param-val" id="mPropVal">30000 kg</span>
+    </div>
+    <div class="param-row">
+      <span class="param-label">Structural mass (kg)</span>
+      <input type="range" min="500" max="10000" step="500" value="3000" id="mStruct" style="flex:1;" oninput="upd('mStruct','mStructVal',v=>v+' kg')">
+      <span class="param-val" id="mStructVal">3000 kg</span>
+    </div>
+
+    <div class="section-label" style="margin-top:12px;">Motor model</div>
+    <div class="param-row">
+      <span class="param-label">Specific impulse Isp (s)</span>
+      <input type="range" min="250" max="460" step="5" value="300" id="isp" style="flex:1;" oninput="upd('isp','ispVal',v=>v+' s')">
+      <span class="param-val" id="ispVal">300 s</span>
+    </div>
+    <div class="param-row">
+      <span class="param-label">Thrust (kN)</span>
+      <input type="range" min="100" max="3000" step="50" value="500" id="thrust" style="flex:1;" oninput="upd('thrust','thrustVal',v=>v+' kN')">
+      <span class="param-val" id="thrustVal">500 kN</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="section-label">Aerodynamics &amp; atmosphere</div>
+    <div class="param-row">
+      <span class="param-label">Drag coefficient Cd</span>
+      <input type="range" min="0.1" max="0.8" step="0.01" value="0.35" id="cd" style="flex:1;" oninput="upd('cd','cdVal',v=>parseFloat(v).toFixed(2))">
+      <span class="param-val" id="cdVal">0.35</span>
+    </div>
+    <div class="param-row">
+      <span class="param-label">Ref. diameter (m)</span>
+      <input type="range" min="0.5" max="5" step="0.1" value="2.4" id="diam" style="flex:1;" oninput="upd('diam','diamVal',v=>parseFloat(v).toFixed(1)+' m')">
+      <span class="param-val" id="diamVal">2.4 m</span>
+    </div>
+    <div class="param-row">
+      <span class="param-label">Atmosphere model</span>
+      <select id="atmosModel" style="flex:1;">
+        <option value="isa">ISA standard</option>
+        <option value="exp">Exponential</option>
+        <option value="none">Vacuum (no drag)</option>
+      </select>
+    </div>
+    <div class="param-row">
+      <span class="param-label">Launch latitude (°)</span>
+      <input type="range" min="-45" max="45" step="1" value="28" id="lat" style="flex:1;" oninput="upd('lat','latVal',v=>v+'°')">
+      <span class="param-val" id="latVal">28°</span>
+    </div>
+
+    <div class="section-label" style="margin-top:12px;">Control &amp; trajectory</div>
+    <div class="param-row">
+      <span class="param-label">Target orbit (km)</span>
+      <input type="range" min="200" max="2000" step="50" value="400" id="targetOrbit" style="flex:1;" oninput="upd('targetOrbit','orbitVal',v=>v+' km')">
+      <span class="param-val" id="orbitVal">400 km</span>
+    </div>
+    <div class="param-row">
+      <span class="param-label">Pitch-over start (km)</span>
+      <input type="range" min="0.5" max="10" step="0.5" value="1.5" id="pitchStart" style="flex:1;" oninput="upd('pitchStart','pitchStartVal',v=>parseFloat(v).toFixed(1)+' km')">
+      <span class="param-val" id="pitchStartVal">1.5 km</span>
+    </div>
+    <div class="param-row">
+      <span class="param-label">Gravity turn rate</span>
+      <input type="range" min="0.2" max="2.0" step="0.1" value="1.0" id="gtRate" style="flex:1;" oninput="upd('gtRate','gtRateVal',v=>parseFloat(v).toFixed(1))">
+      <span class="param-val" id="gtRateVal">1.0</span>
+    </div>
+
+    <button class="run-btn" id="runBtn" onclick="runSim()">Run simulation</button>
+  </div>
+</div>
+
+<div class="grid4" id="metrics">
+  <div class="metric-card"><div class="metric-label">Max altitude</div><div class="metric-val" id="mAlt">—</div><div class="metric-unit">km</div></div>
+  <div class="metric-card"><div class="metric-label">Max velocity</div><div class="metric-val" id="mVel">—</div><div class="metric-unit">m/s</div></div>
+  <div class="metric-card"><div class="metric-label">Max-Q</div><div class="metric-val" id="mMaxQ">—</div><div class="metric-unit">Pa</div></div>
+  <div class="metric-card"><div class="metric-label">Orbit achieved</div><div class="metric-val" id="mOrbit">—</div><div class="metric-unit"></div></div>
+</div>
+
+<div class="card">
+  <div class="tabs" id="chartTabs">
+    <button class="tab active" onclick="showChart(0)">Altitude</button>
+    <button class="tab" onclick="showChart(1)">Velocity</button>
+    <button class="tab" onclick="showChart(2)">Acceleration</button>
+    <button class="tab" onclick="showChart(3)">Dynamic pressure</button>
+    <button class="tab" onclick="showChart(4)">Mass flow</button>
+    <button class="tab" onclick="showChart(5)">Drag vs thrust</button>
+    <button class="tab" onclick="showChart(6)">Trajectory</button>
+  </div>
+  <div class="chart-wrap"><canvas id="mainChart"></canvas></div>
+</div>
+
+<script>
+function upd(id, outId, fmt) {
+  const v = document.getElementById(id).value;
+  document.getElementById(outId).textContent = fmt(v);
+}
+
+const G0 = 9.80665, RE = 6371000, MU = 3.986e14;
+
+function atmosISA(h) {
+  if (h > 86000) return { rho:0, p:0, T:186 };
+  if (h > 20000) { const T=216.65, p=5474.89*Math.exp(-G0*(h-20000)/(287*T)); return {rho:p/(287*T),p,T}; }
+  if (h > 11000) { const T=216.65, p=22632.1*Math.exp(-G0*(h-11000)/(287*T)); return {rho:p/(287*T),p,T}; }
+  const T=288.15-0.0065*h, p=101325*Math.pow(T/288.15,5.2561); return {rho:p/(287*T),p,T};
+}
+function atmosExp(h) { const rho=1.225*Math.exp(-h/8500); return {rho,p:rho*287*288,T:288}; }
+function atmosNone() { return {rho:0,p:0,T:0}; }
+
+let simData = null, chartInst = null, currentTab = 0;
+
+function runSim() {
+  const btn = document.getElementById('runBtn');
+  btn.textContent = 'Simulating...'; btn.disabled = true;
+  setTimeout(() => {
+    const mPay     = +document.getElementById('mPayload').value;
+    const mProp0   = +document.getElementById('mProp').value;
+    const mStr     = +document.getElementById('mStruct').value;
+    const isp      = +document.getElementById('isp').value;
+    const thrust   = +document.getElementById('thrust').value * 1000;
+    const cd       = +document.getElementById('cd').value;
+    const diam     = +document.getElementById('diam').value;
+    const atmosM   = document.getElementById('atmosModel').value;
+    const lat      = +document.getElementById('lat').value * Math.PI / 180;
+    const targetH  = +document.getElementById('targetOrbit').value * 1000;
+    const pitchStart = +document.getElementById('pitchStart').value * 1000;
+    const gtRate   = +document.getElementById('gtRate').value;
+
+    const getAtmos = atmosM === 'isa' ? atmosISA : atmosM === 'exp' ? atmosExp : atmosNone;
+    const Aref = Math.PI * (diam/2)**2;
+    const mdot = thrust / (isp * G0);
+
+    let t=0, h=0, vv=0, vh=0, mass = mPay + mProp0 + mStr;
+    const dt = 0.5;
+    const tArr=[],hArr=[],velArr=[],accArr=[],qArr=[],dragArr=[],thrustArr=[],massArr=[],xArr=[],yArr=[];
+    let prop = mProp0, engineOn = true;
+    let maxQ=0, maxH=0, maxV=0;
+
+    for (let iter=0; iter<20000; iter++) {
+      const atm = getAtmos(h);
+      const v   = Math.sqrt(vv*vv + vh*vh);
+      const q   = 0.5 * atm.rho * v * v;
+      if (q > maxQ) maxQ = q;
+      const drag = q * cd * Aref;
+      const grav = G0 * Math.pow(RE/(RE+h), 2);
+      let thrustNow=0, mdotNow=0;
+
+      if (engineOn && prop > 0) {
+        thrustNow = thrust; mdotNow = mdot;
+        prop  -= mdot * dt;
+        mass  -= mdot * dt;
+        if (prop <= 0) engineOn = false;
+      }
+
+      let angle = Math.PI/2;
+      if (h > pitchStart) {
+        const progress = Math.min(1, (h - pitchStart) / (targetH * 0.8));
+        angle = Math.max(0, Math.PI/2 - gtRate * progress * Math.PI/2);
+      }
+
+      const thrustVV = thrustNow * Math.sin(angle);
+      const thrustVH = thrustNow * Math.cos(angle);
+      const dragVV   = drag * (vv / Math.max(v, 0.01));
+      const dragVH   = drag * (vh / Math.max(v, 0.01));
+      const accV = (thrustVV - dragVV) / mass - grav;
+      const accH = (thrustVH - dragVH) / mass;
+
+      vv += accV * dt; vh += accH * dt; h += vv * dt;
+      const accTotal = Math.sqrt(accV*accV + accH*accH);
+      if (h < 0) { h=0; vv=0; break; }
+      if (h > maxH) maxH = h;
+      if (v > maxV) maxV = v;
+
+      if (iter % 4 === 0) {
+        tArr.push(+t.toFixed(1));
+        hArr.push(+(h/1000).toFixed(2));
+        velArr.push(+v.toFixed(1));
+        accArr.push(+(accTotal/G0).toFixed(3));
+        qArr.push(+q.toFixed(1));
+        dragArr.push(+(drag/1000).toFixed(2));
+        thrustArr.push(+(thrustNow/1000).toFixed(2));
+        massArr.push(+(mass/1000).toFixed(2));
+        xArr.push(+((h/1000)*Math.sin(Math.atan2(vh,vv))).toFixed(2));
+        yArr.push(+(h/1000).toFixed(2));
+      }
+      t += dt;
+      if (h > targetH * 1.5 || t > 1200) break;
+    }
+
+    const orbAchieved = maxH/1000 >= +document.getElementById('targetOrbit').value * 0.9;
+    document.getElementById('mAlt').textContent  = (maxH/1000).toFixed(0);
+    document.getElementById('mVel').textContent  = maxV.toFixed(0);
+    document.getElementById('mMaxQ').textContent = maxQ.toFixed(0);
+    document.getElementById('mOrbit').textContent = orbAchieved ? 'Yes' : 'No';
+    simData = { t:tArr, h:hArr, vel:velArr, acc:accArr, q:qArr, drag:dragArr, thrust:thrustArr, mass:massArr, x:xArr, y:yArr };
+    btn.textContent = 'Run simulation'; btn.disabled = false;
+    showChart(currentTab);
+  }, 50);
+}
+
+function showChart(idx) {
+  currentTab = idx;
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', i===idx));
+  if (!simData) return;
+  if (chartInst) { chartInst.destroy(); chartInst = null; }
+  const gridColor = 'rgba(0,0,0,0.07)', textColor = '#666';
+  const colors = ['#378ADD','#D85A30','#1D9E75','#D4537E','#BA7517','#7F77DD'];
+  const cfgs = [
+    { label:'Altitude (km)',           data:simData.h,      yLabel:'km',      color:colors[0] },
+    { label:'Velocity (m/s)',          data:simData.vel,    yLabel:'m/s',     color:colors[1] },
+    { label:'Acceleration (g)',        data:simData.acc,    yLabel:'g',       color:colors[2] },
+    { label:'Dynamic pressure (Pa)',   data:simData.q,      yLabel:'Pa',      color:colors[3] },
+    { label:'Mass (tonnes)',           data:simData.mass,   yLabel:'tonnes',  color:colors[4] },
+  ];
+  const canvas = document.getElementById('mainChart');
+  if (idx === 6) {
+    chartInst = new Chart(canvas, { type:'scatter', data:{ datasets:[{ label:'Trajectory', data: simData.x.map((x,i)=>({x,y:simData.y[i]})), borderColor:colors[0], pointRadius:1, showLine:true }]}, options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}}, scales:{ x:{title:{display:true,text:'Downrange (km)',color:textColor},grid:{color:gridColor},ticks:{color:textColor}}, y:{title:{display:true,text:'Altitude (km)',color:textColor},grid:{color:gridColor},ticks:{color:textColor}} } } });
+    return;
+  }
+  if (idx === 5) {
+    chartInst = new Chart(canvas, { type:'line', data:{ labels:simData.t, datasets:[{ label:'Thrust (kN)', data:simData.thrust, borderColor:colors[1], pointRadius:0, borderWidth:2 },{ label:'Drag (kN)', data:simData.drag, borderColor:colors[3], pointRadius:0, borderWidth:2, borderDash:[4,4] }]}, options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{display:true,labels:{color:textColor,boxWidth:12}}}, scales:{ x:{ticks:{color:textColor,maxTicksLimit:10},grid:{color:gridColor}}, y:{ticks:{color:textColor},grid:{color:gridColor},title:{display:true,text:'kN',color:textColor}} } } });
+    return;
+  }
+  const cfg = cfgs[idx];
+  chartInst = new Chart(canvas, { type:'line', data:{ labels:simData.t, datasets:[{ label:cfg.label, data:cfg.data, borderColor:cfg.color, pointRadius:0, borderWidth:2, fill:true, backgroundColor:cfg.color+'22' }]}, options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}}, scales:{ x:{title:{display:true,text:'Time (s)',color:textColor},ticks:{color:textColor,maxTicksLimit:10},grid:{color:gridColor}}, y:{title:{display:true,text:cfg.yLabel,color:textColor},ticks:{color:textColor},grid:{color:gridColor}} } } });
+}
+
+runSim();
+</script>
+</body>
+</html>
