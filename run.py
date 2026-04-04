@@ -32,11 +32,14 @@ params = Params(
     a_cmd_t         = 0.0,   # tangential accel command  (m/s²)
     a_cmd_nv        = 0.0,   # pitch-normal accel command (m/s²)
     a_cmd_nh        = 0.0,   # yaw-normal accel command   (m/s²)
-    # ── PN guidance target ────────────────────────────
+    # ── IACPN guidance target ─────────────────────────
     x_target     = 10,       # km North
-    y_target     = 10,       # km East  — post-burnout PN achieves ~0.9 m miss
+    y_target     = 10,       # km East
     z_target     = 0,        # km altitude
-    a_lat_max    = 3.0,      # g  (PN saturation limit)
+    a_lat_max    = 3.0,      # g  (saturation limit)
+    # ── Impact angle constraints ──────────────────────
+    hit_gamma_v  = -60,      # deg  desired impact flight-path angle (-90 = vertical)
+    hit_gamma_h  = 45,       # deg  desired impact azimuth (45 = from NE)
 )
 
 result = simulate(params)

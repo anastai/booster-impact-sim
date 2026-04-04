@@ -112,17 +112,35 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
         if lift > max_lift:
             max_lift = lift
 
-        # ── PN guidance (terminal phase: post-burnout only) ───────────────
+        # ── IACPN guidance (terminal phase: post-burnout only) ───────────
         # During powered flight the booster follows the gravity turn to build
         # up altitude and kinetic energy. Activating PN earlier would
         # continuously pitch the nose toward the ground target and destroy range.
         if not state.engine_on and spd > 0.01 and state.mass > 0:
             a_drag_t = -(0.5 * rho * spd * spd * Aref * params.cd_fall) / state.mass
+
+            # Range gate: angle correction only activates within hit_angle_range of target
+            r_to_target = math.sqrt(
+                (state.x - x_target_m)**2 +
+                (state.y - y_target_m)**2 +
+                (state.h - z_target_m)**2
+            )
+            hit_angle_range_m = (params.hit_angle_range * 1_000.0
+                                 if params.hit_angle_range is not None else None)
+            angle_law_active = (hit_angle_range_m is None or
+                                r_to_target <= hit_angle_range_m)
+
+            hit_gv = (math.radians(params.hit_gamma_v)
+                      if params.hit_gamma_v is not None and angle_law_active else None)
+            hit_gh = (math.radians(params.hit_gamma_h)
+                      if params.hit_gamma_h is not None and angle_law_active else None)
             a_zem = lateral_accel_command(
                 state.x, state.y, state.h,
                 spd, state.gamma_v, state.gamma_h,
                 x_target_m, y_target_m, z_target_m, a_lat_max_ms2, grav,
                 a_drag_t=a_drag_t,
+                hit_gamma_v=hit_gv,
+                hit_gamma_h=hit_gh,
             )
         else:
             a_zem = (0.0, 0.0)

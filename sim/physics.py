@@ -70,11 +70,18 @@ class Params:
     a_cmd_t:      float = 0.0       # constant tangential    cmd  (m/s²)  (NEW)
     a_cmd_nv:     float = 0.0       # constant pitch-normal  cmd  (m/s²)  (NEW)
     a_cmd_nh:     float = 0.0       # constant yaw-normal    cmd  (m/s²)  (NEW)
-    # ── ZEM guidance target ──────────────────────────────────────────────
+    # ── Guidance target ──────────────────────────────────────────────────
     x_target:     float = 100.0     # target downrange   (km)
     y_target:     float = 0.0       # target crossrange  (km)
     z_target:     float = 0.0       # target altitude    (km)
-    a_lat_max:    float = 1.0       # max ZEM lateral accel limit  (g)
+    a_lat_max:    float = 1.0       # max lateral accel limit  (g)
+    # ── Impact angle constraints (None = unconstrained) ──────────────────
+    hit_gamma_v:  float | None = None  # desired impact flight-path angle (deg)
+                                       # e.g. -70 = steep near-vertical dive
+    hit_gamma_h:  float | None = None  # desired impact azimuth (deg)
+                                       # e.g. 45 = hit from the NE
+    hit_angle_range: float | None = None  # range from target at which angle law activates (km)
+                                          # None = active throughout entire post-burnout flight
 
 
 # ---------------------------------------------------------------------------

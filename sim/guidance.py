@@ -1,33 +1,38 @@
 """
-Guidance law: Proportional Navigation (PN) — velocity-frame edition (v2.0).
+Guidance law: Impact Angle Constrained Proportional Navigation (IACPN).
 
-Pure PN formulation
--------------------
-The acceleration command is proportional to the LOS (line-of-sight) angular
-rate, scaled by the closing velocity:
+Two additive terms, both in velocity-frame normals (ê_nV, ê_nH)
+----------------------------------------------------------------
+1. Standard PN  — drives position error to zero by nulling the LOS rate:
 
-    a_cmd = N · Vc · dλ/dt
+       a_PN = N · Vc · dλ/dt
 
-where:
-    λ     = (target − missile) / |target − missile|   — LOS unit vector
-    Vc    = v_missile · λ                              — closing velocity (m/s)
-    dλ/dt = (Ṙ − (Ṙ·λ)λ) / r                         — LOS angular rate (rad/s)
-    Ṙ     = −v_missile                                 — relative velocity (target fixed)
-    N     = navigation constant (typically 3–5)
+   Projected onto ê_nV and ê_nH, this gives the (a_nV_PN, a_nH_PN) pair.
 
-The resulting 3-D acceleration vector is perpendicular to the LOS direction
-and is then projected onto the velocity-frame normal axes ê_nV and ê_nH to
-produce the (a_nV, a_nH) commands used by the equations of motion.
+2. Impact angle term  — corrects the terminal approach angle relative to the
+   LOS direction.  Under pure PN the missile arrives approximately along the
+   current LOS, so LOS elevation / azimuth ≈ natural impact angles.
+   The correction drives the difference between desired and LOS angles to zero:
 
-Velocity-frame axes (inertial components)
-------------------------------------------
-  ê_t   = [ cos(γV)·cos(γH),  cos(γV)·sin(γH),  sin(γV) ]
-  ê_nV  = [-sin(γV)·cos(γH), -sin(γV)·sin(γH),  cos(γV) ]   (pitch-up normal)
-  ê_nH  = [-sin(γH),           cos(γH),           0       ]   (yaw-left normal)
+       a_nV_angle = K · v · sin(hit_γV − γV_LOS) / tgo
+       a_nH_angle = K · v · cos(γV) · sin(hit_γH − γH_LOS) / tgo
+
+   Signs are consistent with the velocity-frame ODEs:
+       dγV/dt = a_nV / v               →  a_nV = v · Δγ_V / tgo
+       dγH/dt = a_nH / (v · cos γV)   →  a_nH = v · cos(γV) · Δγ_H / tgo
+
+If hit_gamma_v and hit_gamma_h are both None the law reduces to pure PN.
+
+Velocity-frame normal axes (inertial components)
+-------------------------------------------------
+  ê_nV  = [−sin(γV)·cos(γH), −sin(γV)·sin(γH),  cos(γV)]   (pitch-up)
+  ê_nH  = [−sin(γH),           cos(γH),           0       ]   (yaw-left)
 """
 import math
 
-GUIDANCE_GAIN = 4.0   # navigation constant N
+GUIDANCE_GAIN = 4.0   # PN navigation constant  N
+ANGLE_GAIN    = 2.0   # impact-angle correction gain K
+_TTG_MIN      = 1.0   # minimum tgo clamp — prevents blow-up near impact (s)
 
 
 def lateral_accel_command(
@@ -36,11 +41,12 @@ def lateral_accel_command(
     x_target: float, y_target: float, z_target: float,
     a_lat_max: float,
     grav: float,
-    a_drag_t: float = 0.0,
+    a_drag_t:    float       = 0.0,
+    hit_gamma_v: float | None = None,
+    hit_gamma_h: float | None = None,
 ) -> tuple:
     """
-    Compute lateral acceleration commands (m/s²) in the velocity frame
-    using Proportional Navigation.
+    Compute lateral acceleration commands (m/s²) in the velocity frame.
 
     Parameters
     ----------
@@ -48,18 +54,20 @@ def lateral_accel_command(
     v              : current speed (m/s)
     gamma_v        : flight-path angle (rad)
     gamma_h        : heading azimuth (rad)
-    x_target       : target North position (m)
-    y_target       : target East  position (m)
-    z_target       : target altitude      (m)
+    x_target       : target North (m)
+    y_target       : target East  (m)
+    z_target       : target altitude (m)
     a_lat_max      : saturation limit (m/s²)
-    grav           : local gravity (m/s²)  — unused by pure PN, kept for API compat
-    a_drag_t       : tangential drag (m/s²) — unused by pure PN, kept for API compat
+    grav           : local gravity (m/s²) — kept for API compatibility
+    a_drag_t       : tangential drag (m/s²) — kept for API compatibility
+    hit_gamma_v    : desired impact flight-path angle (rad). None = unconstrained
+    hit_gamma_h    : desired impact azimuth (rad).            None = unconstrained
 
     Returns
     -------
-    (a_nV, a_nH)   : acceleration commands in the velocity frame (m/s²)
+    (a_nV, a_nH)   : acceleration commands in velocity-frame normals (m/s²)
     """
-    # ── Range to target ───────────────────────────────────────────────────────
+    # ── Range vector ──────────────────────────────────────────────────────────
     Rx = x_target - x
     Ry = y_target - y
     Rz = z_target - h
@@ -68,46 +76,69 @@ def lateral_accel_command(
     if r < 50.0 or v <= 1.0 or a_lat_max <= 0.0:
         return 0.0, 0.0
 
-    # ── LOS unit vector ────────────────────────────────────────────────────────
+    # ── LOS unit vector ───────────────────────────────────────────────────────
     lx, ly, lz = Rx / r, Ry / r, Rz / r
 
-    # ── Missile velocity (inertial) ────────────────────────────────────────────
+    # ── Missile velocity (inertial) ───────────────────────────────────────────
     cos_gV = math.cos(gamma_v)
     sin_gV = math.sin(gamma_v)
     cos_gH = math.cos(gamma_h)
     sin_gH = math.sin(gamma_h)
 
-    vx = v * cos_gV * cos_gH   # North
-    vy = v * cos_gV * sin_gH   # East
-    vz = v * sin_gV             # Up
+    vx = v * cos_gV * cos_gH
+    vy = v * cos_gV * sin_gH
+    vz = v * sin_gV
 
-    # ── Closing velocity: Vc = v_missile · λ ──────────────────────────────────
+    # ── Closing velocity ──────────────────────────────────────────────────────
     Vc = vx*lx + vy*ly + vz*lz
-    if Vc <= 0.0:               # moving away from target — no command
+    if Vc <= 0.0:
         return 0.0, 0.0
 
-    # ── Relative velocity: Ṙ = d(target − missile)/dt = −v_missile ────────────
-    Rvx, Rvy, Rvz = -vx, -vy, -vz
-
-    # ── LOS angular rate: dλ/dt = (Ṙ − (Ṙ·λ)λ) / r ──────────────────────────
-    Rdl  = Rvx*lx + Rvy*ly + Rvz*lz   # = −Vc
+    # ── PN term: a_PN = N · Vc · dλ/dt ───────────────────────────────────────
+    Rvx, Rvy, Rvz = -vx, -vy, -vz          # relative velocity (target fixed)
+    Rdl  = Rvx*lx + Rvy*ly + Rvz*lz        # = −Vc
     dlx  = (Rvx - Rdl*lx) / r
     dly  = (Rvy - Rdl*ly) / r
     dlz  = (Rvz - Rdl*lz) / r
 
-    # ── PN command in inertial frame: a = N · Vc · dλ/dt ─────────────────────
-    ax_des = GUIDANCE_GAIN * Vc * dlx
-    ay_des = GUIDANCE_GAIN * Vc * dly
-    az_des = GUIDANCE_GAIN * Vc * dlz
+    ax_pn = GUIDANCE_GAIN * Vc * dlx
+    ay_pn = GUIDANCE_GAIN * Vc * dly
+    az_pn = GUIDANCE_GAIN * Vc * dlz
 
-    # ── Project onto velocity-frame normal axes ────────────────────────────────
+    # ── Project PN onto velocity-frame normals ────────────────────────────────
     # ê_nV = [−sin(γV)cos(γH), −sin(γV)sin(γH), cos(γV)]
-    a_nV = (-ax_des * sin_gV * cos_gH
-            -ay_des * sin_gV * sin_gH
-            +az_des * cos_gV)
+    a_nV = -ax_pn*sin_gV*cos_gH - ay_pn*sin_gV*sin_gH + az_pn*cos_gV
 
     # ê_nH = [−sin(γH), cos(γH), 0]
-    a_nH = -ax_des * sin_gH + ay_des * cos_gH
+    a_nH = -ax_pn*sin_gH + ay_pn*cos_gH
+
+    # ── Impact angle correction ───────────────────────────────────────────────
+    # Under pure PN the missile arrives approximately along the LOS.
+    # LOS elevation / azimuth are therefore the "natural" predicted impact angles.
+    # The correction biases (a_nV, a_nH) to steer the actual terminal angles
+    # toward (hit_gamma_v, hit_gamma_h) relative to those LOS angles.
+    if hit_gamma_v is not None or hit_gamma_h is not None:
+        r_H    = math.sqrt(Rx*Rx + Ry*Ry)                  # horizontal range
+
+        # LOS elevation: negative when missile is above target
+        gV_los = math.atan2(Rz, max(r_H, 1.0))
+
+        # LOS azimuth: heading toward target
+        gH_los = math.atan2(Ry, Rx) if r_H > 1.0 else gamma_h
+
+        tgo = max(r / Vc, _TTG_MIN)
+
+        if hit_gamma_v is not None:
+            dg_V  = hit_gamma_v - gV_los
+            # a_nV drives dγV/dt = a_nV/v  →  a_nV = v · δγV / tgo
+            a_nV += ANGLE_GAIN * v * math.sin(dg_V) / tgo
+
+        if hit_gamma_h is not None:
+            dg_H  = hit_gamma_h - gH_los
+            # wrap angle error to [−π, π]
+            dg_H  = (dg_H + math.pi) % (2 * math.pi) - math.pi
+            # a_nH drives dγH/dt = a_nH/(v·cos γV)  →  a_nH = v·cos(γV)·δγH/tgo
+            a_nH += ANGLE_GAIN * v * cos_gV * math.sin(dg_H) / tgo
 
     # ── Saturate resultant ────────────────────────────────────────────────────
     mag = math.sqrt(a_nV*a_nV + a_nH*a_nH)
