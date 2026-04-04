@@ -218,16 +218,16 @@ if __name__ == '__main__':
         launch_angle=45, launch_azimuth=45, a_lat_max=3.0,
     )
 
-    # Hit points spread across a wide azimuth range (N, NE, E, SE)
+    # Hit points at very different ranges AND azimuths — maximally distinct paths
     hit_points = [
-        (14,  0, 0),   # due East
-        (10, 10, 0),   # NE 45°
-        ( 4, 13, 0),   # NNE ~72°
-        ( 0, 14, 0),   # due North
+        ( 5,  0, 0),   # close East   ~5 km
+        (10, 10, 0),   # medium NE    ~14 km
+        ( 0, 12, 0),   # medium North ~12 km
+        ( 8,  3, 0),   # ESE          ~9 km
     ]
     hit_angles = [
-        (-70, None),   # steep dive, unconstrained azimuth
-        (-45, None),   # shallow dive, unconstrained azimuth
+        (-70, None),   # steep dive
+        (-45, None),   # shallow dive
     ]
 
     print(f'Running grid: {len(hit_points)} hit points × {len(hit_angles)} angle pairs'
