@@ -218,6 +218,7 @@ if __name__ == '__main__':
         launch_angle=45, launch_azimuth=45, a_lat_max=3.0,
     )
 
+
     # Hit points at very different ranges AND azimuths — maximally distinct paths
     hit_points = [
         ( 5,  0, 0),   # close East   ~5 km
