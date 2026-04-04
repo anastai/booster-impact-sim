@@ -112,10 +112,12 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
         if lift > max_lift:
             max_lift = lift
 
-        # ── IACPN guidance (active throughout powered and ballistic flight) ─
-        if spd > 0.01 and state.mass > 0:
-            cd_now_guidance = params.cd if state.engine_on else params.cd_fall
-            a_drag_t = -(0.5 * rho * spd * spd * Aref * cd_now_guidance) / state.mass
+        # ── IACPN guidance (post-burnout only) ───────────────────────────────
+        # During powered flight the booster follows the gravity turn to build
+        # altitude and energy. PN would pitch the nose toward the ground target
+        # during ascent and destroy range.
+        if not state.engine_on and spd > 0.01 and state.mass > 0:
+            a_drag_t = -(0.5 * rho * spd * spd * Aref * params.cd_fall) / state.mass
 
             # Range gate: angle correction only activates within hit_angle_range of target
             r_to_target = math.sqrt(
