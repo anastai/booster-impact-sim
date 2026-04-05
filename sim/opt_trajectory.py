@@ -57,6 +57,7 @@ def sim_open_loop(
     anV_knots: np.ndarray,
     anH_knots: np.ndarray,
     dt:        float = 0.2,
+    _series:   bool  = True,
 ) -> dict:
     """
     Forward simulation driven by a piecewise-linear lateral acceleration
@@ -165,7 +166,7 @@ def sim_open_loop(
                   if a_lat_max_ms2 > 0.0 else 0.0)
 
         # ── Log ───────────────────────────────────────────────────────────
-        if i % _LOG_EVERY == 0:
+        if _series and i % _LOG_EVERY == 0:
             ser['t']          .append(round(state.t, 1))
             ser['x']          .append(round(state.x / 1_000, 2))
             ser['y']          .append(round(state.y / 1_000, 2))
@@ -206,6 +207,177 @@ def sim_open_loop(
 
 
 # ---------------------------------------------------------------------------
+# Fast evaluation kernel (used inside the optimizer only)
+# ---------------------------------------------------------------------------
+#
+# Identical physics to sim_open_loop but with three Python-level speedups:
+#   1. No State / StepLog dataclass allocation — plain float variables.
+#   2. integrate_step inlined — eliminates 8 M+ function-call overheads.
+#   3. Direct bin-index formula instead of np.interp binary search
+#      (valid because t_knots is always a linspace).
+# Returns only (miss_m, flight_time_s, final_gamma_v_rad, final_gamma_h_rad)
+# — the four scalars needed by the merit function.
+
+def _sim_eval_fast(
+    params: Params,
+    t_knots: np.ndarray,   # linspace — equally spaced
+    anV_knots: np.ndarray, # m/s²
+    anH_knots: np.ndarray, # m/s²
+    dt: float,
+) -> tuple:
+    """Fast optimizer-only evaluation kernel. Returns (miss_m, t_f, gV_f, gH_f)."""
+    # ── Precompute constants ───────────────────────────────────────────────
+    thrust_n      = params.thrust_kn * 1_000.0
+    x_t           = params.x_target  * 1_000.0
+    y_t           = params.y_target  * 1_000.0
+    z_t           = params.z_target  * 1_000.0
+    a_lat_max_ms2 = params.a_lat_max * G0
+    Aref          = math.pi * (params.diam / 2.0) ** 2
+    mdot          = thrust_n / (params.isp * G0)
+    prop_used     = min(params.m_prop, mdot * params.burn_max)
+    grav_turn_v_min = params.grav_turn_v_min
+    cd_pow        = params.cd
+    cd_fall       = params.cd_fall
+    cl            = params.cl
+    cd_ctrl       = params.cd_ctrl
+    a_cmd_t       = params.a_cmd_t
+    a_cmd_nv      = params.a_cmd_nv
+    a_cmd_nh      = params.a_cmd_nh
+    m_pay_str     = params.m_pay + params.m_str
+    grav_turn     = params.grav_turn
+    gV0_fixed     = math.radians(params.launch_angle)   # for fixed-body mode
+
+    # Direct linspace index constants
+    nk            = len(t_knots)
+    tk0           = float(t_knots[0])
+    tk1           = float(t_knots[-1])
+    tk_span       = tk1 - tk0 if tk1 > tk0 else 1e-9
+    nk_minus1     = float(nk - 1)
+
+    # ── Initial state as plain floats ─────────────────────────────────────
+    v        = 0.0
+    gV       = math.radians(params.launch_angle)
+    gH       = math.radians(params.launch_azimuth)
+    h        = 0.0
+    x        = 0.0
+    y        = 0.0
+    mass     = params.m_pay + params.m_prop + params.m_str
+    t        = 0.0
+    prop_rem = prop_used
+    eng_on   = True
+
+    passed_above = (z_t <= 0.0)
+    half_dt      = 0.5 * dt
+
+    for _ in range(_MAX_STEPS):
+        spd  = v
+        grav = gravity(h)           # call the shared helper — preserves FP identity
+        rho  = density(params.atm, h)
+
+        qS = 0.5 * rho * spd * spd * Aref
+
+        # ── Engine ────────────────────────────────────────────────────────
+        if eng_on and prop_rem > 0:
+            thr_now  = thrust_n
+            prop_rem = prop_rem - mdot * dt
+            mass     = mass - mdot * dt
+            if prop_rem <= 0.0 or t >= params.burn_max:
+                eng_on   = False
+                mass     = m_pay_str + (params.m_prop - prop_used)
+        else:
+            thr_now = 0.0
+
+        # ── Aerodynamics ──────────────────────────────────────────────────
+        cd_now    = cd_pow if eng_on else cd_fall
+        drag_aero = qS * cd_now
+        lift      = qS * cl
+
+        # ── Command interpolation — direct linspace index ─────────────────
+        idx_f  = (t - tk0) / tk_span * nk_minus1
+        idx    = int(idx_f)
+        if idx < 0:
+            a_nV = anV_knots[0]
+            a_nH = anH_knots[0]
+        elif idx >= nk - 1:
+            a_nV = anV_knots[-1]
+            a_nH = anH_knots[-1]
+        else:
+            frac = idx_f - idx
+            a_nV = anV_knots[idx] + frac * (anV_knots[idx + 1] - anV_knots[idx])
+            a_nH = anH_knots[idx] + frac * (anH_knots[idx + 1] - anH_knots[idx])
+
+        # Actuator saturation
+        mag = math.sqrt(a_nV * a_nV + a_nH * a_nH)
+        if a_lat_max_ms2 > 0.0 and mag > a_lat_max_ms2:
+            s = a_lat_max_ms2 / mag
+            a_nV *= s
+            a_nH *= s
+
+        aLat   = math.sqrt(a_nV * a_nV + a_nH * a_nH)
+        d_ctrl = (qS * cd_ctrl * (aLat / a_lat_max_ms2) ** 2
+                  if a_lat_max_ms2 > 0.0 else 0.0)
+        drag_tot = drag_aero + d_ctrl
+
+        # ── Inlined integrate_step ─────────────────────────────────────────
+        spd_safe = max(spd, 1e-6)
+
+        if grav_turn:
+            T_t, T_nV, T_nH = thr_now, 0.0, 0.0
+        else:
+            alpha = gV0_fixed - gV
+            T_t   = thr_now * math.cos(alpha)
+            T_nV  = thr_now * math.sin(alpha)
+            T_nH  = 0.0
+
+        rotation_active = spd_safe > (grav_turn_v_min if grav_turn else 0.5)
+        sin_gV = math.sin(gV)
+        cos_gV = math.cos(gV)
+
+        dv_dt = (T_t - drag_tot) / mass - grav * sin_gV + a_cmd_t
+
+        if rotation_active:
+            dgV_dt = ((T_nV + lift) / (mass * spd_safe)
+                      - grav * cos_gV / spd_safe
+                      + a_cmd_nv / spd_safe
+                      + a_nV    / spd_safe)
+            vcos = spd_safe * cos_gV
+            dgH_dt = ((T_nH / (mass * vcos)
+                       + a_cmd_nh / vcos
+                       + a_nH    / vcos)
+                      if abs(vcos) > 0.5 else 0.0)
+        else:
+            dgV_dt = 0.0
+            dgH_dt = 0.0
+
+        new_v  = max(0.0, v + dv_dt * dt)
+        new_gV = gV + dgV_dt * dt
+        _gV_lim = math.pi / 2 - 1e-4        # matches integrate_step exactly
+        if new_gV < -_gV_lim:
+            new_gV = -_gV_lim
+        elif new_gV > _gV_lim:
+            new_gV = _gV_lim
+        new_gH = gH + dgH_dt * dt
+
+        new_h  = h + new_v * math.sin(new_gV) * dt
+        new_x  = x + new_v * math.cos(new_gV) * math.cos(new_gH) * dt
+        new_y  = y + new_v * math.cos(new_gV) * math.sin(new_gH) * dt
+        t     += dt
+
+        v, gV, gH, h, x, y = new_v, new_gV, new_gH, new_h, new_x, new_y
+
+        # ── Termination ───────────────────────────────────────────────────
+        if h > z_t + 50.0:
+            passed_above = True
+        if passed_above and h <= z_t:
+            break
+        if h <= 0.0:
+            break
+
+    miss = math.sqrt((x - x_t) ** 2 + (y - y_t) ** 2 + (h - z_t) ** 2)
+    return miss, t, gV, gH
+
+
+# ---------------------------------------------------------------------------
 # Optimizer
 # ---------------------------------------------------------------------------
 
@@ -218,6 +390,7 @@ def optimize_trajectory(
     w_angle_h: float       = 0.01,
     w_time:    float       = 1e-5,
     dt:        float       = 0.2,
+    dt_eval:   float|None  = None,
     method:    str         = 'L-BFGS-B',
     max_iter:  int         = 500,
     use_de:    bool        = False,
@@ -258,7 +431,10 @@ def optimize_trajectory(
     w_angle_v  : weight on impact γV error² (per deg²)
     w_angle_h  : weight on impact γH error² (per deg²)
     w_time     : weight on flight time (per s)
-    dt         : integration timestep (s)
+    dt         : integration timestep (s) for the final trajectory and warm-start.
+    dt_eval    : integration timestep used during optimisation evaluations.
+                 Defaults to dt.  A coarser value (e.g. 0.5) speeds up each
+                 sim call with negligible effect on the converged solution.
     method     : local optimiser — 'L-BFGS-B' (default) or 'SLSQP'.
     max_iter   : maximum iterations per phase.
     use_de     : prepend a differential_evolution global search before Phase 1.
@@ -276,6 +452,9 @@ def optimize_trajectory(
 
     a_max_ms2  = (a_max_g if a_max_g is not None else params.a_lat_max) * G0
     has_angles = (params.hit_gamma_v is not None or params.hit_gamma_h is not None)
+    # _dt_arr[0] is the active timestep inside _eval; it starts coarse and is
+    # switched to dt for the final refinement pass when dt_eval != dt.
+    _dt_arr = [dt_eval if dt_eval is not None else dt]
 
     # ── Step 1: IACPN runs — nominal for reporting, no-angle for warm start ──
     nominal  = _iacpn(params, dt=dt)
@@ -329,28 +508,24 @@ def optimize_trajectory(
               't_f': float('inf'), 'x': x0.copy()}
 
     def _eval(x: np.ndarray) -> tuple:
-        """Run one simulation and return (J_current, J_full, miss, t_f, fs)."""
+        """Run one fast simulation and return (miss, t_f, gV_f, gH_f).  No series recorded."""
         n_eval[0] += 1
         anV_k = x[:n_knots] * a_max_ms2
         anH_k = x[n_knots:] * a_max_ms2
-        r    = sim_open_loop(params, t_knots, anV_k, anH_k, dt=dt)
-        fs   = r['final_state']
-        miss = r['miss_m']
-        t_f  = r['flight_time_s']
-        return fs, miss, t_f
+        return _sim_eval_fast(params, t_knots, anV_k, anH_k, _dt_arr[0])
 
     def make_merit(use_angle: bool):
         """Return a callable merit function with or without angle terms."""
         def _merit(x: np.ndarray) -> float:
-            fs, miss, t_f = _eval(x)
+            miss, t_f, gV_f, gH_f = _eval(x)
 
             J = w_miss * miss * miss + w_time * t_f
 
             err_v = err_h = 0.0
             if hit_gv is not None:
-                err_v = math.degrees(fs.gamma_v - hit_gv)
+                err_v = math.degrees(gV_f - hit_gv)
             if hit_gh is not None:
-                dh    = (fs.gamma_h - hit_gh + math.pi) % (2 * math.pi) - math.pi
+                dh    = (gH_f - hit_gh + math.pi) % (2 * math.pi) - math.pi
                 err_h = math.degrees(dh)
 
             if use_angle:
@@ -369,7 +544,8 @@ def optimize_trajectory(
     # ── Step 2: optional DE global warm-start ────────────────────────────
     if verbose:
         print(f"  Optimising {2 * n_knots} knot values,  "
-              f"a_max = {a_max_ms2 / G0:.2f} g,  method = {method}")
+              f"a_max = {a_max_ms2 / G0:.2f} g,  method = {method},  "
+              f"dt_eval = {_dt_arr[0]} s")
 
     if use_de:
         if verbose:
@@ -404,6 +580,21 @@ def optimize_trajectory(
                  options={'maxiter': max_iter, 'ftol': 1e-12, 'eps': 1e-4})
         if verbose:
             print(f"  Phase 2 done : miss = {best['miss_m']:.2f} m  |  "
+                  f"{n_eval[0]} evals")
+
+    # ── Step 4b: Refinement pass — switch to accurate dt if a coarser dt_eval was used ──
+    # The coarse-dt optimizer finds good knot values for the coarse physics;
+    # a short pass at the accurate dt translates that solution back to the
+    # true dynamics and eliminates residual integration error.
+    if _dt_arr[0] != dt:
+        _dt_arr[0] = dt   # switch closure to accurate dt
+        best['J_full'] = float('inf')  # allow refinement to update best
+        if verbose:
+            print(f"  Refinement (dt={dt}) — {method} ...")
+        minimize(make_merit(has_angles), best['x'].copy(), method=method, bounds=bounds,
+                 options={'maxiter': 100, 'ftol': 1e-12, 'eps': 1e-4})
+        if verbose:
+            print(f"  Refinement done : miss = {best['miss_m']:.2f} m  |  "
                   f"{n_eval[0]} evals")
 
     if verbose:
