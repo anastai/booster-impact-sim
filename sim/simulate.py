@@ -112,10 +112,7 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
         if lift > max_lift:
             max_lift = lift
 
-        # ── IACPN guidance (active from launch) ──────────────────────────────
-        # During powered flight: yaw channel only (a_nH) — heading is corrected
-        # toward the target while pitch (a_nV) is left to the gravity turn.
-        # After burnout: full PN + IACPN on both channels.
+        # ── IACPN guidance (active from launch, both channels throughout) ──────
         if spd > 0.01 and state.mass > 0:
             cd_now_guidance = params.cd if state.engine_on else params.cd_fall
             a_drag_t = -(0.5 * rho * spd * spd * Aref * cd_now_guidance) / state.mass
@@ -143,9 +140,6 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
                 hit_gamma_v=hit_gv,
                 hit_gamma_h=hit_gh,
             )
-            # During burn: suppress pitch channel — gravity turn owns γV
-            if state.engine_on:
-                a_zem = (0.0, a_zem[1])
         else:
             a_zem = (0.0, 0.0)
 
