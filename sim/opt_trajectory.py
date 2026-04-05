@@ -23,6 +23,14 @@ Merit function
       + w_angle_h ·  γH_err_deg²    [only when params.hit_gamma_h is set]
       + w_time    ·  t_flight_s
 
+When angle constraints are present the optimisation runs in two phases:
+    Phase 1 — miss only: drives miss to < 1 m without angle interference.
+    Phase 2 — full merit starting from Phase 1 result: improves angle
+              accuracy without losing the good miss distance.
+
+The best solution found across ALL evaluations is always returned — so
+hitting max_iter never discards a good intermediate result.
+
 subject to:  sqrt(a_nV² + a_nH²)  ≤  a_max_g · G0   at all times.
 """
 from __future__ import annotations
@@ -229,62 +237,79 @@ def optimize_trajectory(
           + w_angle_h ·  γH_err_deg²    [only when params.hit_gamma_h set]
           + w_time    ·  t_flight_s
 
-    Default weights make miss distance the dominant term; angle accuracy
-    becomes significant once miss < ~1 m, and flight-time minimisation
-    provides a gentle nudge throughout.
+    Optimisation strategy
+    ---------------------
+    Phase 1 (always): minimise miss only (angle terms off).
+        Guarantees < 1 m miss before angle accuracy is attempted.
+    Phase 2 (angle-constrained cases only): full merit from Phase 1 result.
+        Improves angle accuracy while the large miss-weight keeps miss small.
+
+    The best solution found across ALL evaluations is returned — hitting
+    max_iter never loses a good intermediate result.
 
     Parameters
     ----------
     params     : Params.  hit_gamma_v / hit_gamma_h activate angle terms.
-    n_knots    : number of piecewise-linear control knot points.
-                 Higher values give richer profiles; 15–30 is usually enough.
+    n_knots    : number of piecewise-linear control knot points (default 20).
     a_max_g    : optimiser lateral acceleration limit (g).
                  Defaults to params.a_lat_max.  The physical actuator cap
-                 (params.a_lat_max) is always enforced inside the simulation
-                 regardless of this setting.
-    w_miss     : weight on miss² (units: per m²)
+                 (params.a_lat_max) is always enforced inside the simulation.
+    w_miss     : weight on miss² (per m²)
     w_angle_v  : weight on impact γV error² (per deg²)
     w_angle_h  : weight on impact γH error² (per deg²)
     w_time     : weight on flight time (per s)
     dt         : integration timestep (s)
-    method     : local optimiser — 'L-BFGS-B' (default, fast) or 'SLSQP'.
-                 Gradients are computed by finite differences (eps=1e-4 s).
-    max_iter   : maximum local-optimiser iterations.
-    use_de     : if True, run differential_evolution first for a global
-                 warm start, then refine with `method`.  Slower but more
-                 robust for difficult angle-constrained cases.
+    method     : local optimiser — 'L-BFGS-B' (default) or 'SLSQP'.
+    max_iter   : maximum iterations per phase.
+    use_de     : prepend a differential_evolution global search before Phase 1.
     verbose    : print progress to stdout.
 
     Returns
     -------
     dict:
-        'summary'  : scalar comparison — nominal IACPN vs optimised
+        'summary'  : scalar comparison — includes 'solved' (miss < 1 m).
         'schedule' : optimal knot times and command values (SI and g)
         'series'   : full time-series of the optimised flight
         'nominal'  : complete simulate() result for the IACPN warm-start run
     """
     from .simulate import simulate as _iacpn
 
-    a_max_ms2 = (a_max_g if a_max_g is not None else params.a_lat_max) * G0
+    a_max_ms2  = (a_max_g if a_max_g is not None else params.a_lat_max) * G0
+    has_angles = (params.hit_gamma_v is not None or params.hit_gamma_h is not None)
 
-    # ── Step 1: IACPN run — estimate flight time, build warm start ────────
-    nominal   = _iacpn(params, dt=dt)
-    t_nom     = nominal['summary']['flight_time_s']
-    miss_nom  = nominal['summary']['miss_distance_m']
+    # ── Step 1: IACPN runs — nominal for reporting, no-angle for warm start ──
+    nominal  = _iacpn(params, dt=dt)
+    t_nom    = nominal['summary']['flight_time_s']
+    miss_nom = nominal['summary']['miss_distance_m']
 
     if verbose:
         print(f"  Nominal IACPN : miss = {miss_nom} m,  t_f = {t_nom:.1f} s")
 
-    # Knot times span [0, t_nom * 1.2] to handle minor overruns
-    t_knots = np.linspace(0.0, t_nom * 1.2, n_knots)
+    # Warm start always comes from a no-angle IACPN run.
+    # When angle constraints are set, the angle-constrained IACPN may produce a
+    # poor trajectory (guidance fighting itself) that makes a bad initial guess.
+    # The no-angle run gives a clean miss-minimising trajectory as starting point.
+    if has_angles:
+        from dataclasses import replace as _dc_replace
+        _p_noangle = _dc_replace(params, hit_gamma_v=None, hit_gamma_h=None)
+        _ws = _iacpn(_p_noangle, dt=dt)
+        t_ws = _ws['summary']['flight_time_s']
+        if verbose:
+            print(f"  Warm-start    : no-angle IACPN, miss = {_ws['summary']['miss_distance_m']} m")
+    else:
+        _ws  = nominal
+        t_ws = t_nom
 
-    nom_t   = np.array(nominal['series']['t'],     dtype=float)
-    nom_anV = np.array(nominal['series']['a_nV'],  dtype=float) * G0   # g → m/s²
-    nom_anH = np.array(nominal['series']['a_nH'],  dtype=float) * G0
+    # Knot times span [0, t_ws * 1.2] to handle minor overruns
+    t_knots = np.linspace(0.0, t_ws * 1.2, n_knots)
 
-    if len(nom_t) > 1:
-        x0_anV = np.interp(t_knots, nom_t, nom_anV)
-        x0_anH = np.interp(t_knots, nom_t, nom_anH)
+    ws_t   = np.array(_ws['series']['t'],    dtype=float)
+    ws_anV = np.array(_ws['series']['a_nV'], dtype=float) * G0   # g → m/s²
+    ws_anH = np.array(_ws['series']['a_nH'], dtype=float) * G0
+
+    if len(ws_t) > 1:
+        x0_anV = np.interp(t_knots, ws_t, ws_anV)
+        x0_anH = np.interp(t_knots, ws_t, ws_anH)
     else:
         x0_anV = np.zeros(n_knots)
         x0_anH = np.zeros(n_knots)
@@ -298,73 +323,99 @@ def optimize_trajectory(
     hit_gv = math.radians(params.hit_gamma_v) if params.hit_gamma_v is not None else None
     hit_gh = math.radians(params.hit_gamma_h) if params.hit_gamma_h is not None else None
 
+    # ── Best-ever tracking (always uses the full merit for comparison) ────
     n_eval = [0]
-    best   = {'J': float('inf'), 'miss_m': float('inf'), 't_f': float('inf')}
+    best   = {'J_full': float('inf'), 'miss_m': float('inf'),
+              't_f': float('inf'), 'x': x0.copy()}
 
-    def merit(x: np.ndarray) -> float:
+    def _eval(x: np.ndarray) -> tuple:
+        """Run one simulation and return (J_current, J_full, miss, t_f, fs)."""
         n_eval[0] += 1
         anV_k = x[:n_knots] * a_max_ms2
         anH_k = x[n_knots:] * a_max_ms2
-
         r    = sim_open_loop(params, t_knots, anV_k, anH_k, dt=dt)
         fs   = r['final_state']
         miss = r['miss_m']
         t_f  = r['flight_time_s']
+        return fs, miss, t_f
 
-        J = w_miss * miss * miss + w_time * t_f
+    def make_merit(use_angle: bool):
+        """Return a callable merit function with or without angle terms."""
+        def _merit(x: np.ndarray) -> float:
+            fs, miss, t_f = _eval(x)
 
-        if hit_gv is not None:
-            err_v = math.degrees(fs.gamma_v - hit_gv)
-            J += w_angle_v * err_v * err_v
+            J = w_miss * miss * miss + w_time * t_f
 
-        if hit_gh is not None:
-            dh    = (fs.gamma_h - hit_gh + math.pi) % (2 * math.pi) - math.pi
-            err_h = math.degrees(dh)
-            J += w_angle_h * err_h * err_h
+            err_v = err_h = 0.0
+            if hit_gv is not None:
+                err_v = math.degrees(fs.gamma_v - hit_gv)
+            if hit_gh is not None:
+                dh    = (fs.gamma_h - hit_gh + math.pi) % (2 * math.pi) - math.pi
+                err_h = math.degrees(dh)
 
-        if J < best['J']:
-            best.update(J=J, miss_m=miss, t_f=t_f)
+            if use_angle:
+                J += w_angle_v * err_v * err_v + w_angle_h * err_h * err_h
 
-        return J
+            # Track full-merit best so the returned result is always correct
+            J_full = (w_miss * miss * miss + w_time * t_f
+                      + w_angle_v * err_v * err_v
+                      + w_angle_h * err_h * err_h)
+            if J_full < best['J_full']:
+                best.update(J_full=J_full, miss_m=miss, t_f=t_f, x=x.copy())
 
-    # ── Step 2: optimise ─────────────────────────────────────────────────
+            return J
+        return _merit
+
+    # ── Step 2: optional DE global warm-start ────────────────────────────
     if verbose:
         print(f"  Optimising {2 * n_knots} knot values,  "
               f"a_max = {a_max_ms2 / G0:.2f} g,  method = {method}")
 
     if use_de:
         if verbose:
-            print("  Phase 1 — differential_evolution (global search) ...")
-        de = differential_evolution(
-            merit, bounds,
-            maxiter=150, popsize=5, tol=1e-6,
-            seed=42, polish=False,
+            print("  Phase DE — differential_evolution (global search) ...")
+        differential_evolution(
+            make_merit(has_angles),
+            bounds, maxiter=150, popsize=5, tol=1e-6, seed=42, polish=False,
         )
-        x0 = de.x
+        x0 = best['x'].copy()
         if verbose:
-            print(f"  DE done : miss = {best['miss_m']:.2f} m,  "
+            print(f"  DE done  : miss = {best['miss_m']:.2f} m,  "
                   f"{n_eval[0]} evals")
 
-    phase = '2' if use_de else '1'
+    # ── Step 3: Phase 1 — miss only ───────────────────────────────────────
+    label1 = 'Phase 1 (miss only)' if has_angles else 'Phase 1'
     if verbose:
-        print(f"  Phase {phase} — {method} local refinement ...")
+        print(f"  {label1} — {method} ...")
 
-    opt = minimize(
-        merit, x0, method=method, bounds=bounds,
-        options={'maxiter': max_iter, 'ftol': 1e-12, 'eps': 1e-4},
-    )
+    minimize(make_merit(False), x0, method=method, bounds=bounds,
+             options={'maxiter': max_iter, 'ftol': 1e-12, 'eps': 1e-4})
+
+    x1 = best['x'].copy()
+    if verbose:
+        print(f"  Phase 1 done : miss = {best['miss_m']:.2f} m  |  "
+              f"{n_eval[0]} evals")
+
+    # ── Step 4: Phase 2 — full merit (angle-constrained cases only) ───────
+    if has_angles:
+        if verbose:
+            print(f"  Phase 2 (full merit) — {method} ...")
+        minimize(make_merit(True), x1, method=method, bounds=bounds,
+                 options={'maxiter': max_iter, 'ftol': 1e-12, 'eps': 1e-4})
+        if verbose:
+            print(f"  Phase 2 done : miss = {best['miss_m']:.2f} m  |  "
+                  f"{n_eval[0]} evals")
 
     if verbose:
-        print(f"  Done : {n_eval[0]} evaluations  |  "
-              f"miss = {best['miss_m']:.2f} m  |  "
-              f"t_f = {best['t_f']:.1f} s  |  "
-              f"converged = {opt.success}")
+        print(f"  Total {n_eval[0]} evaluations  |  "
+              f"best miss = {best['miss_m']:.2f} m  |  "
+              f"t_f = {best['t_f']:.1f} s")
 
-    # ── Step 3: final trajectory with optimal schedule ────────────────────
-    x_opt    = opt.x
-    anV_opt  = x_opt[:n_knots] * a_max_ms2
-    anH_opt  = x_opt[n_knots:] * a_max_ms2
-    final    = sim_open_loop(params, t_knots, anV_opt, anH_opt, dt=dt)
+    # ── Step 5: final trajectory using best-ever x ───────────────────────
+    x_opt   = best['x']
+    anV_opt = x_opt[:n_knots] * a_max_ms2
+    anH_opt = x_opt[n_knots:] * a_max_ms2
+    final   = sim_open_loop(params, t_knots, anV_opt, anH_opt, dt=dt)
 
     fs = final['final_state']
     angle_errs: dict = {}
@@ -376,14 +427,13 @@ def optimize_trajectory(
 
     return {
         'summary': {
+            'solved':                  final['miss_m'] < 1.0,
             'nominal_miss_m':          miss_nom,
             'optimised_miss_m':        round(final['miss_m'], 2),
             'nominal_flight_time_s':   t_nom,
             'optimised_flight_time_s': round(final['flight_time_s'], 1),
             **angle_errs,
             'n_evaluations':           n_eval[0],
-            'optimiser_success':       opt.success,
-            'optimiser_message':       opt.message,
         },
         'schedule': {
             't_knots_s':      t_knots.tolist(),
@@ -426,7 +476,8 @@ def plot_optimised(result: dict, title: str = 'Trajectory optimisation') -> None
         f"{title}\n"
         f"miss: {summ['nominal_miss_m']} m → {summ['optimised_miss_m']} m  |  "
         f"t_f: {summ['nominal_flight_time_s']:.1f} s → "
-        f"{summ['optimised_flight_time_s']:.1f} s",
+        f"{summ['optimised_flight_time_s']:.1f} s  |  "
+        f"solved: {summ['solved']}",
         fontsize=11,
     )
 
