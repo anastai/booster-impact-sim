@@ -382,19 +382,20 @@ def _sim_eval_fast(
 # ---------------------------------------------------------------------------
 
 def optimize_trajectory(
-    params:    Params,
-    n_knots:   int         = 20,
-    a_max_g:   float|None  = None,
-    w_miss:    float       = 1.0,
-    w_angle_v: float       = 0.01,
-    w_angle_h: float       = 0.01,
-    w_time:    float       = 1e-5,
-    dt:        float       = 0.2,
-    dt_eval:   float|None  = None,
-    method:    str         = 'L-BFGS-B',
-    max_iter:  int         = 500,
-    use_de:    bool        = False,
-    verbose:   bool        = True,
+    params:         Params,
+    n_knots:        int         = 20,
+    a_max_g:        float|None  = None,
+    w_miss:         float       = 1.0,
+    w_angle_v:      float       = 0.01,
+    w_angle_h:      float       = 0.01,
+    w_time:         float       = 1e-5,
+    dt:             float       = 0.2,
+    dt_eval:        float|None  = None,
+    method:         str         = 'L-BFGS-B',
+    max_iter:       int         = 500,
+    use_de:         bool        = False,
+    verbose:        bool        = True,
+    miss_threshold: float       = 1.0,
 ) -> dict:
     """
     Optimise the lateral acceleration schedule for a single trajectory.
@@ -413,7 +414,7 @@ def optimize_trajectory(
     Optimisation strategy
     ---------------------
     Phase 1 (always): minimise miss only (angle terms off).
-        Guarantees < 1 m miss before angle accuracy is attempted.
+        Guarantees miss < miss_threshold before angle accuracy is attempted.
     Phase 2 (angle-constrained cases only): full merit from Phase 1 result.
         Improves angle accuracy while the large miss-weight keeps miss small.
 
@@ -437,13 +438,14 @@ def optimize_trajectory(
                  sim call with negligible effect on the converged solution.
     method     : local optimiser — 'L-BFGS-B' (default) or 'SLSQP'.
     max_iter   : maximum iterations per phase.
-    use_de     : prepend a differential_evolution global search before Phase 1.
-    verbose    : print progress to stdout.
+    use_de          : prepend a differential_evolution global search before Phase 1.
+    verbose         : print progress to stdout.
+    miss_threshold  : miss distance (m) below which 'solved' is set True (default 1.0).
 
     Returns
     -------
     dict:
-        'summary'  : scalar comparison — includes 'solved' (miss < 1 m).
+        'summary'  : scalar comparison — includes 'solved' (miss < miss_threshold).
         'schedule' : optimal knot times and command values (SI and g)
         'series'   : full time-series of the optimised flight
         'nominal'  : complete simulate() result for the IACPN warm-start run
@@ -618,7 +620,7 @@ def optimize_trajectory(
 
     return {
         'summary': {
-            'solved':                  final['miss_m'] < 1.0,
+            'solved':                  final['miss_m'] < miss_threshold,
             'nominal_miss_m':          miss_nom,
             'optimised_miss_m':        round(final['miss_m'], 2),
             'nominal_flight_time_s':   t_nom,

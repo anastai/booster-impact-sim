@@ -219,7 +219,8 @@ def run_grid(
 # Grid plot
 # ---------------------------------------------------------------------------
 
-def plot_grid(runs: list[dict], title: str = 'Grid run results') -> None:
+def plot_grid(runs: list[dict], title: str = 'Grid run results',
+             miss_threshold: float = 1.0) -> None:
     """
     Four-panel dashboard for all grid runs.
 
@@ -228,7 +229,7 @@ def plot_grid(runs: list[dict], title: str = 'Grid run results') -> None:
     [0] Ground track  (North/East) — ▲ launch  ● burnout  ★ target
     [1] Altitude vs time           — ● burnout point
     [2] Flight-path angle γV vs time — dashed lines for desired hit angles
-    [3] Miss distance bar chart    — green = solved (<1 m), amber = not solved,
+    [3] Miss distance bar chart    — green = solved (< miss_threshold m), amber = not solved,
                                      grey = IACPN run (no solved concept)
 
     Summary table is printed to console after the plot.
@@ -303,12 +304,12 @@ def plot_grid(runs: list[dict], title: str = 'Grid run results') -> None:
             bar_colors.append('#d62728')   # red
 
     bars = ax_miss.bar(x_pos, misses, color=bar_colors, width=0.6)
-    ax_miss.axhline(1.0, color='#2ca02c', lw=1.2, ls='--',
-                    label='1 m threshold' if optimised_any else None)
+    ax_miss.axhline(miss_threshold, color='#2ca02c', lw=1.2, ls='--',
+                    label=f'{miss_threshold:g} m threshold' if optimised_any else None)
     ax_miss.set_xticks(x_pos)
     ax_miss.set_xticklabels([f'#{i+1}' for i in range(n)], fontsize=9)
     ax_miss.set_ylabel('Miss distance (m)')
-    ax_miss.set_title('Miss distance  (■ green=solved <1 m, ■ red=not solved)')
+    ax_miss.set_title(f'Miss distance  (■ green=solved <{miss_threshold:g} m, ■ red=not solved)')
     ax_miss.grid(alpha=0.3, axis='y')
 
     top = max(misses) if max(misses) > 0 else 1
@@ -393,15 +394,15 @@ def plot_grid(runs: list[dict], title: str = 'Grid run results') -> None:
 
 if __name__ == '__main__':
     base = Params(
-        m_pay=50, m_prop=495, m_str=50, isp=260, thrust_kn=31, burn_max=20,
-        cd=0.4, cd_fall=1.2, cl=0.0, cd_ctrl=0.3, diam=0.5,
+        m_pay=50, m_prop=100, m_str=50, isp=260, thrust_kn=31, burn_max=20,
+        cd=0.4, cd_fall=0.4, cl=0.0, cd_ctrl=0.3, diam=0.5,
         launch_angle=45, launch_azimuth=45, a_lat_max=3.0,
     )
 
     hit_points = [
-        (10, 10, 0),   # NE   ~14 km
-        ( 0, 12, 0),   # N    ~12 km
-        ( 8,  3, 0),   # ESE  ~9 km
+        (20, 20, 0),   # NE   
+        ( 0, 15, 0),   # N   
+        ( 15,  3, 0),   # ESE  
     ]
     hit_angles = [
         (-45, None),
