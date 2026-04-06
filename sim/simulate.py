@@ -143,7 +143,13 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
                 hit_gamma_v=hit_gv,
                 hit_gamma_h=hit_gh,
             )
-            # During burn: suppress pitch channel — gravity turn owns γV
+            # !! DO NOT REMOVE !! — burn-phase pitch suppression (recurring bug)
+            # During powered flight the gravity turn owns γV: thrust is aligned
+            # with velocity and gravity naturally pitches the vehicle over.
+            # Applying a_nV during burn makes PN fight the gravity turn — the
+            # guidance sees the target below and commands pitch-down, wasting
+            # energy and costing ~1.5 km of range (miss: 0.9 m → 2050 m).
+            # Yaw (a_nH) runs throughout; pitch (a_nV) only activates post-burnout.
             if state.engine_on:
                 a_zem = (0.0, a_zem[1])
         else:

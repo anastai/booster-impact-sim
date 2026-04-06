@@ -147,6 +147,31 @@ class TestGuidance:
         r = simulate(p)
         assert all(a == 0.0 for a in r['series']['aLat'])
 
+    def test_burn_phase_pitch_suppressed(self):
+        """
+        During powered flight a_nV must be zero (burn-phase pitch suppression).
+
+        !! Recurring regression !! — this line is removed whenever the suppression
+        block in simulate.py is deleted/commented.  The gravity turn owns γV during
+        burn; allowing PN to command a_nV at the same time causes it to fight the
+        gravity turn and increases miss from ~1 m to ~2000 m.
+
+        Check: all a_nV samples that fall inside the burn window must be 0.
+        """
+        from dataclasses import replace as dc_replace
+        # Use grav_turn=True so burn-phase pitch suppression is relevant
+        p = dc_replace(make(), grav_turn=True, launch_angle=45, launch_azimuth=45,
+                       x_target=10.0, y_target=10.0, a_lat_max=3.0)
+        r = simulate(p)
+        s = r['series']
+        burnout_t = r['summary']['burnout_time_s']
+        for t, anV in zip(s['t'], s['a_nV']):
+            if t < burnout_t:
+                assert anV == 0.0, (
+                    f"a_nV={anV} g at t={t}s (burn phase) — "
+                    "pitch suppression block in simulate.py may have been removed"
+                )
+
 
 # ---------------------------------------------------------------------------
 # CV-4: Actuator drag
