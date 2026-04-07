@@ -117,6 +117,7 @@ def run_grid(
     hit_angle_range:  float | None = None,
     optimise:         bool = False,
     opt_kwargs:       dict | None = None,
+    auto_azimuth:     bool = False,
 ) -> list[dict]:
     """
     Run the simulation or optimizer for every combination of
@@ -138,6 +139,10 @@ def run_grid(
                        Common keys: n_knots, a_max_g, w_miss, w_angle_v,
                        w_angle_h, w_time, method, max_iter, use_de.
                        Defaults: n_knots=20, verbose=False (quiet grid run).
+    auto_azimuth     : if True, set launch_azimuth = atan2(y_target, x_target)
+                       for each run so the booster is always aimed at the target.
+                       Enables hitting targets in any direction, including negative
+                       X / negative Y.  Overrides base_params.launch_azimuth.
 
     Returns
     -------
@@ -172,6 +177,10 @@ def run_grid(
         print(f'  [{mode}] Run {idx+1}/{total}:  '
               f'target=({x},{y},{z}) km  {angle_str}')
 
+        az_override = {}
+        if auto_azimuth and (x != 0 or y != 0):
+            az_override['launch_azimuth'] = math.degrees(math.atan2(y, x))
+
         p = replace(
             base_params,
             x_target        = x,
@@ -180,6 +189,7 @@ def run_grid(
             hit_gamma_v     = gv,
             hit_gamma_h     = gh,
             hit_angle_range = hit_angle_range,
+            **az_override,
         )
 
         if optimise:

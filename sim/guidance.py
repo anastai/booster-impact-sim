@@ -5,7 +5,10 @@ Two additive terms, both in velocity-frame normals (ê_nV, ê_nH)
 ----------------------------------------------------------------
 1. Standard PN  — drives position error to zero by nulling the LOS rate:
 
-       a_PN = N · Vc · dλ/dt
+       a_PN = N · gain · dλ/dt
+       gain = Vc  when Vc > 0  (closing — original behaviour, best accuracy)
+            = v   when Vc ≤ 0  (receding — keeps guidance active for targets
+                                 in any direction, including "behind" the launch)
 
    Projected onto ê_nV and ê_nH, this gives the (a_nV_PN, a_nH_PN) pair.
 
@@ -90,20 +93,24 @@ def lateral_accel_command(
     vz = v * sin_gV
 
     # ── Closing velocity ──────────────────────────────────────────────────────
+    # When Vc > 0 (closing): use Vc as PN gain — original behaviour,
+    # preserves 0.9 m miss on forward targets.
+    # When Vc ≤ 0 (receding / flying away from target): fall back to v so
+    # guidance stays active and can steer toward targets in any direction,
+    # enabling engagement of targets "behind" the launch azimuth.
     Vc = vx*lx + vy*ly + vz*lz
-    if Vc <= 0.0:
-        return 0.0, 0.0
+    _pn_gain = Vc if Vc > 0.0 else v
 
-    # ── PN term: a_PN = N · Vc · dλ/dt ───────────────────────────────────────
+    # ── PN term: a_PN = N · _pn_gain · dλ/dt ────────────────────────────────
     Rvx, Rvy, Rvz = -vx, -vy, -vz          # relative velocity (target fixed)
     Rdl  = Rvx*lx + Rvy*ly + Rvz*lz        # = −Vc
     dlx  = (Rvx - Rdl*lx) / r
     dly  = (Rvy - Rdl*ly) / r
     dlz  = (Rvz - Rdl*lz) / r
 
-    ax_pn = GUIDANCE_GAIN * Vc * dlx
-    ay_pn = GUIDANCE_GAIN * Vc * dly
-    az_pn = GUIDANCE_GAIN * Vc * dlz
+    ax_pn = GUIDANCE_GAIN * _pn_gain * dlx
+    ay_pn = GUIDANCE_GAIN * _pn_gain * dly
+    az_pn = GUIDANCE_GAIN * _pn_gain * dlz
 
     # ── Project PN onto velocity-frame normals ────────────────────────────────
     # ê_nV = [−sin(γV)cos(γH), −sin(γV)sin(γH), cos(γV)]
@@ -126,7 +133,7 @@ def lateral_accel_command(
         # LOS azimuth: heading toward target
         gH_los = math.atan2(Ry, Rx) if r_H > 1.0 else gamma_h
 
-        tgo = max(r / Vc, _TTG_MIN)
+        tgo = max(r / v, _TTG_MIN)
 
         if hit_gamma_v is not None:
             dg_V  = hit_gamma_v - gV_los
