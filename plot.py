@@ -59,15 +59,30 @@ def plot_results(result: dict, params: Params = None) -> None:
     ax0.legend(fontsize=8)
     ax0.grid(alpha=0.3)
 
-    # ── [1] Top-down ground track ────────────────────────────────────────
+    # ── [1] Top-down ground track (North up, East right) ────────────────
     ax1 = fig.add_subplot(gs[0, 1])
-    ax1.plot(s['x'], s['y'], color='#1D9E75', linewidth=1.5, label='Ground track')
+    # Plot with East on X-axis, North on Y-axis (map convention)
+    ax1.plot(s['y'], s['x'], color='#1D9E75', linewidth=1.5, label='Ground track')
+    ax1.scatter([0], [0], color='#378ADD', marker='^', s=80, zorder=5, label='Launch')
     if params is not None:
-        ax1.scatter([params.x_target], [params.y_target], color='#D85A30',
+        ax1.scatter([params.y_target], [params.x_target], color='#D85A30',
                     marker='x', s=120, zorder=5, label='Target')
-    ax1.set_xlabel('North X (km)')
-    ax1.set_ylabel('East Y (km)')
-    ax1.set_title('Top-down view')
+        # Launch azimuth arrow (from origin toward launch direction)
+        az_rad = math.radians(params.launch_azimuth)
+        arrow_len = math.sqrt(params.x_target**2 + params.y_target**2) * 0.25
+        ax1.annotate('', xytext=(0, 0),
+                     xy=(math.sin(az_rad) * arrow_len,
+                         math.cos(az_rad) * arrow_len),
+                     arrowprops=dict(arrowstyle='->', color='#D85A30',
+                                     lw=1.5, mutation_scale=12))
+        ax1.text(math.sin(az_rad) * arrow_len * 1.1,
+                 math.cos(az_rad) * arrow_len * 1.1,
+                 f'Az {params.launch_azimuth:.0f}°',
+                 fontsize=7, color='#D85A30', ha='center')
+    ax1.set_xlabel('East (km)')
+    ax1.set_ylabel('North (km)')
+    ax1.set_title('Top-down view  (N↑ E→)')
+    ax1.set_aspect('equal', adjustable='datalim')
     ax1.legend(fontsize=8)
     ax1.grid(alpha=0.3)
 
