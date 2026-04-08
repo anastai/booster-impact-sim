@@ -147,6 +147,37 @@ class TestGuidance:
         r = simulate(p)
         assert all(a == 0.0 for a in r['series']['aLat'])
 
+    def test_left_right_symmetry(self):
+        """
+        Targeting (x, +y) and (x, -y) with the same launch azimuth must produce
+        mirror-image trajectories with identical miss distances.
+
+        The physics has no left/right bias: guidance law, aerodynamics, and
+        integration are all symmetric about the vertical plane through the
+        launch direction.  A broken sign in ê_nH, a_nH, or the yaw ODE would
+        break this symmetry.
+
+        Checks:
+          - miss distances agree to < 0.1 m
+          - impact_x identical (same downrange)
+          - impact_y mirrored (opposite sign, < 10 m tolerance at km scale)
+        """
+        p_right = make(x_target=10.0, y_target= 5.0, a_lat_max=2.0)
+        p_left  = make(x_target=10.0, y_target=-5.0, a_lat_max=2.0)
+        r_right = simulate(p_right)['summary']
+        r_left  = simulate(p_left )['summary']
+
+        assert abs(r_right['miss_distance_m'] - r_left['miss_distance_m']) < 0.1, (
+            f"Left/right miss mismatch: right={r_right['miss_distance_m']} m "
+            f"left={r_left['miss_distance_m']} m"
+        )
+        assert abs(r_right['impact_x_km'] - r_left['impact_x_km']) < 0.01, (
+            f"impact_x differs: {r_right['impact_x_km']} vs {r_left['impact_x_km']}"
+        )
+        assert abs(r_right['impact_y_km'] + r_left['impact_y_km']) < 0.01, (
+            f"impact_y not mirrored: {r_right['impact_y_km']} vs {r_left['impact_y_km']}"
+        )
+
     def test_burn_phase_pitch_suppressed(self):
         """
         During powered flight a_nV must be zero (burn-phase pitch suppression).
