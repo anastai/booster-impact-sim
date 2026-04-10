@@ -38,7 +38,7 @@ params = Params(
     z_target     = 0,        # km altitude
     a_lat_max    = 3.0,      # g  (saturation limit)
     # ── Impact angle constraints ──────────────────────
-    hit_gamma_v  = -60,      # deg  desired impact flight-path angle (-90 = vertical)
+    hit_gamma_v  = -30,      # deg  desired impact flight-path angle (-90 = vertical)
     hit_gamma_h  = 45,       # deg  desired impact azimuth (45 = from NE)
 )
 

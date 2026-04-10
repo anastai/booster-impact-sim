@@ -135,7 +135,7 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
                       if params.hit_gamma_v is not None and angle_law_active else None)
             hit_gh = (math.radians(params.hit_gamma_h)
                       if params.hit_gamma_h is not None and angle_law_active else None)
-            a_zem = lateral_accel_command(
+            a_nV_cmd, a_nH_cmd, pursuit_mode = lateral_accel_command(
                 state.x, state.y, state.h,
                 spd, state.gamma_v, state.gamma_h,
                 x_target_m, y_target_m, z_target_m, a_lat_max_ms2, grav,
@@ -143,12 +143,15 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
                 hit_gamma_v=hit_gv,
                 hit_gamma_h=hit_gh,
             )
+            a_zem = (a_nV_cmd, a_nH_cmd)
             # !! DO NOT REMOVE !! — burn-phase pitch suppression (recurring bug)
             # During powered flight the gravity turn owns γV: thrust is aligned
             # with velocity and gravity naturally pitches the vehicle over.
             # Applying a_nV during burn makes PN fight the gravity turn — the
             # guidance sees the target below and commands pitch-down, wasting
             # energy and costing ~1.5 km of range (miss: 0.9 m → 2050 m).
+            # For backward engagements the pursuit law also pitches toward the
+            # ground-level target, crashing the missile before burnout.
             # Yaw (a_nH) runs throughout; pitch (a_nV) only activates post-burnout.
             if state.engine_on:
                 a_zem = (0.0, a_zem[1])
