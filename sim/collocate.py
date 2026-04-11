@@ -48,12 +48,26 @@ Exponential model  ρ = 1.225·exp(−h/8 500)  — smoothly differentiable.
 The piecewise ISA model is not used here because CasADi requires
 smooth (at least C¹) functions for IPOPT's interior-point solver.
 
-Merit function  (identical weights to opt_trajectory.py)
----------------------------------------------------------
-  J = w_miss    · miss_m²
-    + w_angle_v · γV_err_deg²   (only when params.hit_gamma_v is set)
-    + w_angle_h · γH_err_deg²   (only when params.hit_gamma_h is set)
-    + w_time    · T_f
+Merit function
+--------------
+  Hit-line mode  (both hit_gamma_v AND hit_gamma_h set in params):
+    A line is drawn through the target point in the desired impact direction
+    d̂ = (cos γV_des·cos γH_des,  cos γV_des·sin γH_des,  sin γV_des).
+    The booster must land anywhere on this line (offset s is a free NLP
+    variable) with angle error ≤ angle_tol_deg on both channels.
+
+      J = w_ctrl · ∫|u|²dt / a_max²   +   w_time · T_f
+
+    Terminal constraints (hard):
+      x_f = x_t + s·d̂_x,  y_f = y_t + s·d̂_y,  h_f = z_t + s·d̂_z
+      |γV_f − γV_des| ≤ angle_tol_deg
+      |γH_f − γH_des| ≤ angle_tol_deg   (handled via cos(Δγ_H) ≥ cos(tol))
+
+    Output key: 'hit_line_offset_m' = s  (signed distance from nominal target)
+
+  Point-target mode  (original, backward compatible, angle constraint absent):
+      J = w_miss · miss_m²  +  w_angle_v · γV_err²  +  w_angle_h · γH_err²
+        + w_time · T_f
 
 Warm start
 ----------
@@ -132,15 +146,23 @@ def _f_powered(s, u, p: Params, thrust_n: float, mdot: float):
 
     # Velocity-frame ODEs (see physics.py for derivation)
     dv   = (T_t - drag_t) / mass - g * ca.sin(gV) + p.a_cmd_t
-    dgV  = ((lift / (mass * spd))
-            - g * ca.cos(gV) / spd
-            + (p.a_cmd_nv + a_nV) / spd)
+
+    # Angle rates are singular at v=0 (g*cos(gV)/v → ∞).
+    # Clamp the denominator speed to max(v, v_thresh) in the angle-rate
+    # equations — this bounds g/v ≤ g/v_thresh (finite) and is differentiable
+    # everywhere (no NaN in CasADi Jacobians).  The clamp effectively holds
+    # angles fixed at very low speeds, matching physics.integrate_step behaviour.
+    _v_thresh = max(p.grav_turn_v_min, 1.0)
+    spd_ang = ca.fmax(v, _v_thresh)     # speed used only in angle-rate denominators
+
     cos_gV  = ca.cos(gV)
-    vcos_gV = spd * cos_gV
-    # Regularise heading-rate equation: near-vertical flight has tiny cos(γV)
-    vcos_safe = ca.if_else(ca.fabs(vcos_gV) > 0.5,
-                           vcos_gV, 0.5 * ca.sign(cos_gV + 1e-9))
-    dgH  = (p.a_cmd_nh + a_nH) / vcos_safe
+    vcos_gV = spd_ang * cos_gV
+    vcos_safe = ca.fmax(ca.fabs(vcos_gV), 0.5) * ca.sign(cos_gV + 1e-9)
+
+    dgV = ((lift / (mass * spd_ang))
+           - g * cos_gV / spd_ang
+           + (p.a_cmd_nv + a_nV) / spd_ang)
+    dgH = (p.a_cmd_nh + a_nH) / vcos_safe
 
     dh   = v * ca.sin(gV)
     dx   = v * ca.cos(gV) * ca.cos(gH)
@@ -175,14 +197,19 @@ def _f_coast(s, u, p: Params, mass_bo: float):
     drag_t  = drag + d_ctrl
 
     dv   = (-drag_t / mass - g * ca.sin(gV) + p.a_cmd_t)
-    dgV  = ((lift / (mass * spd))
-            - g * ca.cos(gV) / spd
-            + (p.a_cmd_nv + a_nV) / spd)
+
+    # Same singularity fix as powered phase
+    _v_thresh = max(p.grav_turn_v_min, 1.0)
+    spd_ang = ca.fmax(v, _v_thresh)
+
     cos_gV  = ca.cos(gV)
-    vcos_gV = spd * cos_gV
-    vcos_safe = ca.if_else(ca.fabs(vcos_gV) > 0.5,
-                           vcos_gV, 0.5 * ca.sign(cos_gV + 1e-9))
-    dgH  = (p.a_cmd_nh + a_nH) / vcos_safe
+    vcos_gV = spd_ang * cos_gV
+    vcos_safe = ca.fmax(ca.fabs(vcos_gV), 0.5) * ca.sign(cos_gV + 1e-9)
+
+    dgV = ((lift / (mass * spd_ang))
+           - g * cos_gV / spd_ang
+           + (p.a_cmd_nv + a_nV) / spd_ang)
+    dgH = (p.a_cmd_nh + a_nH) / vcos_safe
 
     dh   = v * ca.sin(gV)
     dx   = v * ca.cos(gV) * ca.cos(gH)
@@ -321,33 +348,42 @@ def _linear_warm_start(opti, S1, U1, S2, U2, T_f_var,
 # ── Main solver ───────────────────────────────────────────────────────────────
 
 def collocation_solve(
-    params:     Params,
-    N1:         int        = 15,
-    N2:         int        = 30,
-    tf_guess:   float|None = None,
-    w_miss:     float      = 1.0,
-    w_angle_v:  float      = 0.01,
-    w_angle_h:  float      = 0.01,
-    w_time:     float      = 1e-5,
-    warm_start: str        = 'iacpn',
-    ipopt_opts: dict|None  = None,
+    params:              Params,
+    N1:                  int        = 15,
+    N2:                  int        = 30,
+    tf_guess:            float|None = None,
+    # ── Hit-line merit (active when both hit_gamma_v and hit_gamma_h are set) ──
+    angle_tol_deg:       float      = 5.0,
+    hit_line_range_max:  float      = 50.0,   # km — max |s| along the line
+    w_ctrl:              float      = 1.0,    # weight on ∫|u|²dt / a_max²
+    w_time:              float      = 1e-3,
+    # ── Point-target merit (fallback when angle constraints absent) ────────────
+    w_miss:              float      = 1.0,
+    w_angle_v:           float      = 0.01,
+    w_angle_h:           float      = 0.01,
+    # ── Solver options ────────────────────────────────────────────────────────
+    warm_start:          str        = 'iacpn',
+    ipopt_opts:          dict|None  = None,
 ) -> dict:
     """
     Solve the booster trajectory OCP via Hermite-Simpson direct collocation.
 
     Parameters
     ----------
-    params      : Params — vehicle and target specification.
-    N1          : Hermite-Simpson segments in powered phase   (default 15).
-    N2          : Hermite-Simpson segments in coast phase     (default 30).
-    tf_guess    : Initial guess for total flight time (s). Estimated if None.
-    w_miss      : Weight on miss² in merit function.
-    w_angle_v   : Weight on γV terminal error² (active when hit_gamma_v set).
-    w_angle_h   : Weight on γH terminal error² (active when hit_gamma_h set).
-    w_time      : Weight on total flight time (minimum-time nudge).
-    warm_start  : 'iacpn' — interpolate IACPN reference run onto nodes.
-                  'linear' — simple straight-line interpolation.
-    ipopt_opts  : Extra IPOPT options dict (overrides defaults).
+    params             : Params — vehicle and target specification.
+    N1                 : Hermite-Simpson segments in powered phase (default 15).
+    N2                 : Hermite-Simpson segments in coast phase   (default 30).
+    tf_guess           : Initial guess for total flight time (s). Estimated if None.
+    angle_tol_deg      : Angle tolerance for hit-line mode (deg). Default 5.
+    hit_line_range_max : Max signed offset |s| along the hit line (km). Default 50.
+    w_ctrl             : Weight on normalised control effort ∫|u|²dt/a_max².
+    w_time             : Weight on total flight time.
+    w_miss             : (point-target fallback) Weight on miss².
+    w_angle_v          : (point-target fallback) Weight on γV error².
+    w_angle_h          : (point-target fallback) Weight on γH error².
+    warm_start         : 'iacpn' — interpolate IACPN reference run onto nodes.
+                         'linear' — simple straight-line interpolation.
+    ipopt_opts         : Extra IPOPT options dict (overrides defaults).
 
     Returns
     -------
@@ -379,8 +415,13 @@ def collocation_solve(
     # Powered-phase segment duration (fixed scalar — t_burn is not a variable)
     h1 = t_burn / N1
 
-    # ── IACPN reference run ────────────────────────────────────────────────
-    iacpn_ref = _sim_iacpn(params)
+    # ── IACPN reference run (no-angle, for warm start) ────────────────────
+    # Angle-constrained IACPN fights itself and produces a chaotic trajectory
+    # that makes a bad warm start.  Always use unconstrained IACPN for the
+    # initial guess, then IPOPT steers from there to the angle solution.
+    from dataclasses import replace as _dc_replace
+    _p_ws = _dc_replace(params, hit_gamma_v=None, hit_gamma_h=None)
+    iacpn_ref = _sim_iacpn(_p_ws)
     if tf_guess is None:
         tf_guess = iacpn_ref['summary']['flight_time_s'] * 1.1
 
@@ -434,6 +475,26 @@ def collocation_solve(
     for k in range(N2 + 1):
         opti.subject_to(S2[0, k] >= 0.0)
 
+    # Flight-path angle bounded to physical range — prevents IPOPT from
+    # driving γV to ±1000° (numerically valid via sin/cos but meaningless).
+    _gV_lim = math.pi / 2 - 1e-3
+    for k in range(N1 + 1):
+        opti.subject_to(S1[1, k] >= -_gV_lim)
+        opti.subject_to(S1[1, k] <=  _gV_lim)
+    for k in range(N2 + 1):
+        opti.subject_to(S2[1, k] >= -_gV_lim)
+        opti.subject_to(S2[1, k] <=  _gV_lim)
+
+    # Heading angle bounded to prevent indefinite wrapping
+    _gH0  = math.radians(params.launch_azimuth)
+    _gH_w = math.pi + 0.5    # ±(180° + 30°) around launch azimuth
+    for k in range(N1 + 1):
+        opti.subject_to(S1[2, k] >= _gH0 - _gH_w)
+        opti.subject_to(S1[2, k] <= _gH0 + _gH_w)
+    for k in range(N2 + 1):
+        opti.subject_to(S2[2, k] >= _gH0 - _gH_w)
+        opti.subject_to(S2[2, k] <= _gH0 + _gH_w)
+
     # ── Dynamics constraints: Hermite-Simpson defects ─────────────────────
     def f1(s, u):
         return _f_powered(s, u, params, thrust_n, mdot)
@@ -449,24 +510,77 @@ def collocation_solve(
         d = _hs_defect(f2, S2[:, k], S2[:, k + 1], U2[:, k], U2[:, k + 1], h2)
         opti.subject_to(d == 0)
 
-    # ── Objective ─────────────────────────────────────────────────────────
+    # ── Terminal state references ──────────────────────────────────────────
     x_f, y_f, h_f = S2[4, N2], S2[5, N2], S2[3, N2]
     gV_f, gH_f    = S2[1, N2], S2[2, N2]
 
-    miss_sq = (x_f - x_t)**2 + (y_f - y_t)**2 + (h_f - z_t)**2
-    J = w_miss * miss_sq + w_time * T_f
+    # ── Control effort: ∫|u|²dt  (trapezoidal, normalised by a_max²) ─────
+    # Result is dimensionless: 1.0 ≡ saturating both channels the whole flight.
+    ctrl_norm = a_max**2 if a_max > 0 else 1.0
+    ctrl_effort = ca.MX(0)
+    for k in range(N1):
+        ctrl_effort = ctrl_effort + 0.5 * h1 * (
+            (U1[0, k]**2 + U1[1, k]**2 + U1[0, k+1]**2 + U1[1, k+1]**2)
+            / ctrl_norm
+        )
+    for k in range(N2):
+        ctrl_effort = ctrl_effort + 0.5 * h2 * (
+            (U2[0, k]**2 + U2[1, k]**2 + U2[0, k+1]**2 + U2[1, k+1]**2)
+            / ctrl_norm
+        )
 
-    if params.hit_gamma_v is not None:
-        gV_des     = math.radians(params.hit_gamma_v)
-        gV_err_deg = (gV_f - gV_des) * (180.0 / math.pi)
-        J += w_angle_v * gV_err_deg**2
+    # ── Hit-line mode vs point-target fallback ────────────────────────────
+    hit_line_mode = (params.hit_gamma_v is not None and
+                     params.hit_gamma_h is not None)
 
-    if params.hit_gamma_h is not None:
-        gH_des     = math.radians(params.hit_gamma_h)
-        # Wrap the heading error to [−180°, +180°] via a smooth approximation
-        gH_err     = gH_f - gH_des
-        gH_err_deg = gH_err * (180.0 / math.pi)
-        J += w_angle_h * gH_err_deg**2
+    if hit_line_mode:
+        # ── HIT-LINE formulation ───────────────────────────────────────────
+        # Direction unit vector along the desired approach line
+        gV_des = math.radians(params.hit_gamma_v)
+        gH_des = math.radians(params.hit_gamma_h)
+        d_x = math.cos(gV_des) * math.cos(gH_des)
+        d_y = math.cos(gV_des) * math.sin(gH_des)
+        d_z = math.sin(gV_des)
+
+        angle_tol_rad        = math.radians(angle_tol_deg)
+        hit_line_range_max_m = hit_line_range_max * 1_000.0
+
+        # s: signed offset along the hit line (m) — free NLP variable
+        s = opti.variable()
+        opti.set_initial(s, 0.0)
+        opti.subject_to(s >= -hit_line_range_max_m)
+        opti.subject_to(s <=  hit_line_range_max_m)
+
+        # Terminal position must lie exactly on the hit line
+        opti.subject_to(x_f == x_t + s * d_x)
+        opti.subject_to(y_f == y_t + s * d_y)
+        opti.subject_to(h_f == z_t + s * d_z)
+
+        # Hard angle tolerance constraints
+        opti.subject_to(gV_f - gV_des <=  angle_tol_rad)
+        opti.subject_to(gV_des - gV_f <=  angle_tol_rad)
+        # Heading: cos(Δγ_H) ≥ cos(tol) handles the ±180° wrap cleanly
+        opti.subject_to(ca.cos(gH_f - gH_des) >= math.cos(angle_tol_rad))
+
+        # Objective: minimise control effort + flight time (no miss term)
+        J = w_ctrl * ctrl_effort + w_time * T_f
+
+    else:
+        # ── POINT-TARGET formulation (backward compatible) ─────────────────
+        miss_sq = (x_f - x_t)**2 + (y_f - y_t)**2 + (h_f - z_t)**2
+        J = w_miss * miss_sq + w_time * T_f
+
+        if params.hit_gamma_v is not None:
+            gV_des     = math.radians(params.hit_gamma_v)
+            gV_err_deg = (gV_f - gV_des) * (180.0 / math.pi)
+            J += w_angle_v * gV_err_deg**2
+
+        if params.hit_gamma_h is not None:
+            gH_des     = math.radians(params.hit_gamma_h)
+            gH_err_deg = (gH_f - gH_des) * (180.0 / math.pi)
+            J += w_angle_h * gH_err_deg**2
+
+        s = None   # no hit-line offset in point-target mode
 
     opti.minimize(J)
 
@@ -523,11 +637,30 @@ def collocation_solve(
     gHfv  = float(S2_s[2, -1])
     miss_v = math.sqrt((x_fv - x_t)**2 + (y_fv - y_t)**2 + (h_fv - z_t)**2)
 
-    n_vars = 7*(N1+1) + 2*(N1+1) + 6*(N2+1) + 2*(N2+1) + 1
+    # Hit-line offset s and angle errors
+    if hit_line_mode:
+        s_val = float(sol.value(s))
+        gV_des_out = math.radians(params.hit_gamma_v)
+        gH_des_out = math.radians(params.hit_gamma_h)
+        gV_err_out = math.degrees(gVfv - gV_des_out)
+        dgh = (gHfv - gH_des_out + math.pi) % (2 * math.pi) - math.pi
+        gH_err_out = math.degrees(dgh)
+        angle_ok = (abs(gV_err_out) <= angle_tol_deg and
+                    abs(gH_err_out) <= angle_tol_deg)
+    else:
+        s_val = None
+        gV_err_out = (math.degrees(gVfv) - params.hit_gamma_v
+                      if params.hit_gamma_v is not None else None)
+        gH_err_out = (math.degrees(gHfv) - params.hit_gamma_h
+                      if params.hit_gamma_h is not None else None)
+        angle_ok = None
+
+    n_vars = 7*(N1+1) + 2*(N1+1) + 6*(N2+1) + 2*(N2+1) + 1 + (1 if hit_line_mode else 0)
     n_ceq  = 7*N1 + 6*N2 + 7 + 6   # HS defects + ICs + continuity
 
     summary: dict = {
         'method':            'direct_collocation_HS',
+        'mode':              'hit_line' if hit_line_mode else 'point_target',
         'solved':            solved,
         'miss_m':            round(miss_v, 2),
         'flight_time_s':     round(T_f_s, 2),
@@ -542,10 +675,17 @@ def collocation_solve(
         'n_variables':       n_vars,
         'n_eq_constraints':  n_ceq,
     }
-    if params.hit_gamma_v is not None:
-        summary['gamma_v_err_deg'] = round(math.degrees(gVfv) - params.hit_gamma_v, 2)
-    if params.hit_gamma_h is not None:
-        summary['gamma_h_err_deg'] = round(math.degrees(gHfv) - params.hit_gamma_h, 2)
+    if hit_line_mode:
+        summary['hit_line_offset_m']  = round(s_val, 2)
+        summary['hit_line_offset_km'] = round(s_val / 1_000, 4)
+        summary['angle_tol_deg']      = angle_tol_deg
+        summary['gamma_v_err_deg']    = round(gV_err_out, 3)
+        summary['gamma_h_err_deg']    = round(gH_err_out, 3)
+        summary['angle_satisfied']    = angle_ok
+    elif params.hit_gamma_v is not None:
+        summary['gamma_v_err_deg']    = round(gV_err_out, 3)
+    elif params.hit_gamma_h is not None:
+        summary['gamma_h_err_deg']    = round(gH_err_out, 3)
 
     schedule = {
         't_powered_s':   t1_arr.tolist(),

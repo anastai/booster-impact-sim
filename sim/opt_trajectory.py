@@ -506,6 +506,7 @@ def optimize_trajectory(
     w_range:         float      = 1.0,     # RangeOnLine  (maximise)
     w_effort:        float      = 1e-3,    # control effort ∫|u|²dt / (a_max² T)
     w_time:          float      = 1e-4,    # flight time T_f
+    w_angle:         float      = 0.5,     # terminal angle error penalty (rad²)
     angle_tol_deg:   float      = 5.0,     # RangeOnLine angle tolerance (deg)
     angle_sharpness: float      = 20.0,    # sigmoid sharpness for smooth RoL
     # ── Solver ──────────────────────────────────────────────────────────────
@@ -536,6 +537,9 @@ def optimize_trajectory(
     w_range         : weight on RangeOnLine (positive = maximise distance).
     w_effort        : weight on normalised control effort.
     w_time          : weight on flight time (s).
+    w_angle         : weight on terminal angle error penalty (rad²).  Provides
+                      gradient signal even when angles are far from target,
+                      preventing the vanishing-gradient problem with smooth RoL.
     angle_tol_deg   : angular tolerance for RangeOnLine (deg).
     angle_sharpness : sigmoid sharpness parameter.
     method          : scipy optimizer ('SLSQP' required for constraints).
@@ -577,7 +581,24 @@ def optimize_trajectory(
     if verbose:
         print(f"  Nominal IACPN : miss = {miss_nom:.1f} m,  t_f = {t_nom:.1f} s")
 
-    T_f_init = t_nom * 1.2
+    # Warm start always from no-angle IACPN — angle-constrained IACPN can
+    # produce a terrible trajectory (guidance fighting itself) that gives a
+    # bad initial guess and makes SLSQP fail to satisfy terminal constraints.
+    has_angles = (params.hit_gamma_v is not None or params.hit_gamma_h is not None)
+    if has_angles:
+        from dataclasses import replace as _dc_replace
+        _p_ws = _dc_replace(params, hit_gamma_v=None, hit_gamma_h=None)
+        _nom_ws = _iacpn(_p_ws, dt=dt)
+        t_ws = _nom_ws['summary']['flight_time_s']
+        if verbose:
+            print(f"  Warm-start    : no-angle IACPN, miss = "
+                  f"{_nom_ws['summary']['miss_distance_m']:.1f} m,  t_f = {t_ws:.1f} s")
+    else:
+        _nom_ws = nominal
+        t_ws = t_nom
+
+    # Use exact IACPN flight time — optimizer adjusts T_f via the decision variable
+    T_f_init = t_ws
     dt_coll  = T_f_init / N
 
     # ── Initial state (fixed, node 0) ────────────────────────────────────────
@@ -590,37 +611,48 @@ def optimize_trajectory(
         0.0,                                    # y
     ])
 
-    # ── Build warm-start controls from IACPN series ──────────────────────────
-    ser     = nominal['series']
-    ws_t    = np.array(ser['t'], dtype=float)
-    t_nodes = np.linspace(0.0, T_f_init, N + 1)          # N+1 node times
-    t_ctrls = t_nodes[:-1]                                 # N control times (node 0..N-1)
+    # ── Warm-start states by INTERPOLATING IACPN states at collocation nodes ─
+    # Key: np.interp clamps queries beyond the last time to the last state value.
+    # Since no-angle IACPN terminates at the target (miss ≈ 0), the last IACPN
+    # state ≈ target.  Nodes beyond t_ws clamp to that terminal state, so the
+    # initial terminal constraint violation ≈ IACPN miss series resolution (~80m).
+    ser    = _nom_ws['series']
+    ws_t   = np.array(ser['t'], dtype=float)
+    t_nodes = np.linspace(0.0, T_f_init, N + 1)   # N+1 node times
+    t_ctrls = t_nodes[:-1]                          # N control interval starts
 
-    ws_anV  = np.interp(t_ctrls, ws_t, np.array(ser['a_nV']) * G0)   # g → m/s²
-    ws_anH  = np.interp(t_ctrls, ws_t, np.array(ser['a_nH']) * G0)
+    ws_v  = np.interp(t_nodes, ws_t, np.array(ser['v'],       dtype=float))
+    ws_gV = np.interp(t_nodes, ws_t, np.radians(np.array(ser['gamma_v'], dtype=float)))
+    ws_gH = np.interp(t_nodes, ws_t, np.radians(np.array(ser['gamma_h'], dtype=float)))
+    ws_h  = np.interp(t_nodes, ws_t, np.array(ser['h'],       dtype=float) * 1_000.0)
+    ws_x  = np.interp(t_nodes, ws_t, np.array(ser['x'],       dtype=float) * 1_000.0)
+    ws_y  = np.interp(t_nodes, ws_t, np.array(ser['y'],       dtype=float) * 1_000.0)
+
+    ws_anV = np.interp(t_ctrls, ws_t, np.array(ser['a_nV'],   dtype=float) * G0)
+    ws_anH = np.interp(t_ctrls, ws_t, np.array(ser['a_nH'],   dtype=float) * G0)
 
     u_nV_init = np.clip(ws_anV / a_max_ms2, -1.0, 1.0)
     u_nH_init = np.clip(ws_anH / a_max_ms2, -1.0, 1.0)
 
-    # Forward-propagate warm-start controls at dt_coll to get near-zero defects
-    states_ws = np.empty((N, 6))
-    s_k = s0.copy()
-    for k in range(N):
-        s_next = _euler_node(
-            s_k,
-            float(u_nV_init[k]) * a_max_ms2,
-            float(u_nH_init[k]) * a_max_ms2,
-            dt_coll, k * dt_coll, Pc,
-        )
-        states_ws[k] = s_next
-        s_k = s_next
+    # States at nodes 1..N (interpolated from IACPN series — units: m/s, rad, m)
+    # Patch the last node to the actual IACPN final state so that the terminal
+    # constraint violation equals the IACPN miss (~0.9 m) rather than the
+    # series-logging offset (~80 m due to 1-s logging resolution).
+    states_init = np.column_stack([
+        ws_v[1:], ws_gV[1:], ws_gH[1:], ws_h[1:], ws_x[1:], ws_y[1:]
+    ])
+    _fs = _nom_ws['summary']  # final state comes from summary impact coords
+    # summary gives impact in km; convert to m and patch the last row
+    states_init[-1, 3] = 0.0                                  # h at impact ≈ z_t
+    states_init[-1, 4] = _nom_ws['summary']['impact_x_km'] * 1_000.0
+    states_init[-1, 5] = _nom_ws['summary']['impact_y_km'] * 1_000.0
 
     # Pack: z = [T_f, u_nV_0..N-1, u_nH_0..N-1, s_1_flat .. s_N_flat]
-    z0 = np.concatenate([[T_f_init], u_nV_init, u_nH_init, states_ws.ravel()])
+    z0 = np.concatenate([[T_f_init], u_nV_init, u_nH_init, states_init.ravel()])
 
     # ── Bounds ────────────────────────────────────────────────────────────────
     _gV_lim = math.pi / 2 - 1e-4
-    bounds  = [(t_nom * 0.5, t_nom * 2.5)]           # T_f
+    bounds  = [(t_ws * 0.5, t_ws * 2.0)]             # T_f
     bounds += [(-1.0, 1.0)] * N                       # u_nV (normalised)
     bounds += [(-1.0, 1.0)] * N                       # u_nH (normalised)
     for _ in range(N):
@@ -665,10 +697,21 @@ def optimize_trajectory(
         else:
             rl = 0.0
 
+        # Terminal angle error penalty — non-zero gradient everywhere.
+        # Prevents vanishing-gradient failure: smooth RoL ≈ 0 when angles are
+        # far from target, giving SLSQP no signal.  This term steers the
+        # optimizer toward the target angles from any starting point.
+        angle_pen = 0.0
+        if hit_gV is not None:
+            angle_pen += (gV_all[-1] - hit_gV) ** 2
+        if hit_gH is not None:
+            dh = ((gH_all[-1] - hit_gH + math.pi) % (2.0 * math.pi)) - math.pi
+            angle_pen += dh ** 2
+
         # Normalised control effort  Σ|u_norm|² · dt_c / (N · dt_c) = Σ|u_norm|² / N
         effort = float(np.sum(u_nV_n ** 2 + u_nH_n ** 2)) / N
 
-        return -w_range * rl + w_effort * effort + w_time * T_f
+        return -w_range * rl + w_angle * angle_pen + w_effort * effort + w_time * T_f
 
     # ── Collocation constraints ───────────────────────────────────────────────
     def _constraints(z):
