@@ -563,27 +563,26 @@ def collocation_solve(
             (U2[0, k+1]**2 + U2[1, k+1]**2) / ak1**2
         )
 
-    # ── Softplus helper (numerically stable for CasADi MX) ───────────────
-    # softplus(x) = log(1 + exp(x)), stable for large x via:
-    #   log(1 + exp(x)) ≈ x  for x >> 0  →  clamp exp input to 50
-    def _sp(x):
+    # ── Softplus: f(x) = log(1 + exp(x)) ────────────────────────────────
+    # Standard mathematical softplus, numerically stable for large x.
+    # Direct formula log(1+exp(x)) overflows for x > ~710 in float64.
+    # Equivalent stable form: clamp the exp input to 50, add the linear
+    # tail for x > 50.  Result is identical to log(1+exp(x)) everywhere.
+    def _softplus(x):
         return ca.log(1.0 + ca.exp(ca.fmin(x, 50.0))) + ca.fmax(x - 50.0, 0.0)
 
-    # miss_merit(miss_m) shape:
-    #   = 0           at miss_m = miss_deadzone   (exact zero — shifted)
-    #   ≈ 0           for miss_m < miss_deadzone  (dead zone)
-    #   ≈ 50          at miss_m = miss_deadzone + 400 m
+    # miss_merit uses softplus shifted so it is exactly 0 at the dead-zone
+    # boundary: softplus(0) = log(2), so softplus(x) - log(2) = 0 at x = 0.
+    #
+    # miss_merit(miss) = scale * (softplus(miss - deadzone) - log(2))
+    #   = 0      at miss = miss_deadzone            (exact)
+    #   ≈ 0      for miss < miss_deadzone            (dead zone)
+    #   ≈ 50     at miss = miss_deadzone + 400 m
     #   grows linearly beyond that
-    # Scale factor: 50 / softplus(400) ≈ 50 / 400 = 0.125
-    _sp_scale = 50.0 / (400.0 + math.log(1.0 + math.exp(-400.0)))  # ≈ 0.12503
+    _sp_scale = 50.0 / (400.0 + math.log(1.0 + math.exp(-400.0)))  # ≈ 0.125
 
     def _miss_merit(miss_m):
-        # Smooth dead-zone: exactly 0 at miss=miss_deadzone, grows ~linearly beyond.
-        # Values are slightly negative inside the dead zone (≥ -0.09 at worst) —
-        # this is intentional; fmax would introduce a non-smooth kink that IPOPT
-        # cannot handle.  The tiny bias is harmless: it is bounded and orders of
-        # magnitude smaller than the dominant hit-line / ctrl terms.
-        return _sp_scale * (_sp(miss_m - miss_deadzone) - math.log(2.0))
+        return _sp_scale * (_softplus(miss_m - miss_deadzone) - math.log(2.0))
 
     # ── Hit-line mode vs point-target fallback ────────────────────────────
     hit_line_mode = (params.hit_gamma_v is not None and
