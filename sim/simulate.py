@@ -203,7 +203,7 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
             passed_above_target = True
         if passed_above_target and state.h <= z_target_m:
             break
-        if state.h <= 0.0:
+        if state.h <= min(0.0, z_target_m):
             break
 
     # ── Miss distance ──────────────────────────────────────────────────────
