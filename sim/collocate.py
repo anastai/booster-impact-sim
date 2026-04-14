@@ -366,6 +366,9 @@ def collocation_solve(
     w_miss:              float      = 1.0,
     w_angle_v:           float      = 0.01,
     w_angle_h:           float      = 0.01,
+    # ── Soft miss penalty (both modes) ───────────────────────────────────────
+    w_miss_soft:         float      = 0.0,    # 0 = disabled (backward compat)
+    miss_deadzone:       float      = 100.0,  # m — no penalty below this miss
     # ── Solver options ────────────────────────────────────────────────────────
     warm_start:          str        = 'iacpn',
     ipopt_opts:          dict|None  = None,
@@ -386,6 +389,11 @@ def collocation_solve(
     w_miss             : (point-target fallback) Weight on miss².
     w_angle_v          : (point-target fallback) Weight on γV error².
     w_angle_h          : (point-target fallback) Weight on γH error².
+    w_miss_soft        : Weight on softplus miss penalty (both modes). 0 = disabled.
+                         Shape: ≈0 below miss_deadzone, ≈50 at deadzone+400 m, then linear.
+                         In hit-line mode miss = |s| (offset along line from nominal target).
+                         In point-target mode miss = Euclidean distance to target.
+    miss_deadzone      : Dead-zone radius (m). No penalty for miss < miss_deadzone.
     warm_start         : 'iacpn' — interpolate IACPN reference run onto nodes.
                          'linear' — simple straight-line interpolation.
     ipopt_opts         : Extra IPOPT options dict (overrides defaults).
@@ -555,6 +563,28 @@ def collocation_solve(
             (U2[0, k+1]**2 + U2[1, k+1]**2) / ak1**2
         )
 
+    # ── Softplus helper (numerically stable for CasADi MX) ───────────────
+    # softplus(x) = log(1 + exp(x)), stable for large x via:
+    #   log(1 + exp(x)) ≈ x  for x >> 0  →  clamp exp input to 50
+    def _sp(x):
+        return ca.log(1.0 + ca.exp(ca.fmin(x, 50.0))) + ca.fmax(x - 50.0, 0.0)
+
+    # miss_merit(miss_m) shape:
+    #   = 0           at miss_m = miss_deadzone   (exact zero — shifted)
+    #   ≈ 0           for miss_m < miss_deadzone  (dead zone)
+    #   ≈ 50          at miss_m = miss_deadzone + 400 m
+    #   grows linearly beyond that
+    # Scale factor: 50 / softplus(400) ≈ 50 / 400 = 0.125
+    _sp_scale = 50.0 / (400.0 + math.log(1.0 + math.exp(-400.0)))  # ≈ 0.12503
+
+    def _miss_merit(miss_m):
+        # Smooth dead-zone: exactly 0 at miss=miss_deadzone, grows ~linearly beyond.
+        # Values are slightly negative inside the dead zone (≥ -0.09 at worst) —
+        # this is intentional; fmax would introduce a non-smooth kink that IPOPT
+        # cannot handle.  The tiny bias is harmless: it is bounded and orders of
+        # magnitude smaller than the dominant hit-line / ctrl terms.
+        return _sp_scale * (_sp(miss_m - miss_deadzone) - math.log(2.0))
+
     # ── Hit-line mode vs point-target fallback ────────────────────────────
     hit_line_mode = (params.hit_gamma_v is not None and
                      params.hit_gamma_h is not None)
@@ -588,13 +618,19 @@ def collocation_solve(
         # Heading: cos(Δγ_H) ≥ cos(tol) handles the ±180° wrap cleanly
         opti.subject_to(ca.cos(gH_f - gH_des) >= math.cos(angle_tol_rad))
 
-        # Objective: minimise control effort + flight time (no miss term)
+        # Objective: minimise control effort + flight time + optional soft miss
         J = w_ctrl * ctrl_effort + w_time * T_f
+        if w_miss_soft > 0:
+            # In hit-line mode, miss = |s| (signed offset along approach line)
+            J = J + w_miss_soft * _miss_merit(ca.fabs(s))
 
     else:
         # ── POINT-TARGET formulation (backward compatible) ─────────────────
         miss_sq = (x_f - x_t)**2 + (y_f - y_t)**2 + (h_f - z_t)**2
         J = w_miss * miss_sq + w_time * T_f
+        if w_miss_soft > 0:
+            miss_m = ca.sqrt(miss_sq + 1e-4)   # sqrt(ε) avoids gradient singularity at 0
+            J = J + w_miss_soft * _miss_merit(miss_m)
 
         if params.hit_gamma_v is not None:
             gV_des     = math.radians(params.hit_gamma_v)
