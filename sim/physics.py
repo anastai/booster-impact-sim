@@ -226,10 +226,18 @@ def integrate_step(
         dgH_dt = 0.0
 
     # ── Forward-Euler integration ──────────────────────────────────────────
-    new_v  = max(0.0, v + dv_dt * dt)
-    new_gV = gV + dgV_dt * dt
+    v_raw = v + dv_dt * dt
+    if v_raw < 0:
+        # Apogee passed: vehicle reverses direction.  Flip γV and heading so
+        # the velocity vector points in the correct (now-falling) direction.
+        new_v  = -v_raw
+        new_gV = -(gV + dgV_dt * dt)
+        new_gH = gH + dgH_dt * dt + math.pi
+    else:
+        new_v  = v_raw
+        new_gV = gV + dgV_dt * dt
+        new_gH = gH + dgH_dt * dt
     new_gV = max(-math.pi / 2 + 1e-4, min(math.pi / 2 - 1e-4, new_gV))
-    new_gH = gH + dgH_dt * dt
 
     # ── Position update (inertial frame) ──────────────────────────────────
     new_h = state.h + new_v * math.sin(new_gV) * dt
