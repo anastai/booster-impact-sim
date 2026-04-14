@@ -114,12 +114,15 @@ def _grav(h):
 
 # ── Velocity-frame dynamics ───────────────────────────────────────────────────
 
-def _f_powered(s, u, p: Params, thrust_n: float, mdot: float):
+def _f_powered(s, u, p: Params, thrust_n: float, mdot: float, a_max_fn=None):
     """
     Continuous-time ODE for the POWERED phase.
 
     s = [v, γV, γH, h, x, y, mass]   (7-vector, CasADi MX)
     u = [a_nV, a_nH]                  (2-vector, m/s²)
+
+    a_max_fn : callable(v) → a_max_m_s2, or None (uses p.a_lat_max * G0).
+               May return a CasADi MX when v is symbolic.
 
     Matches the velocity-frame equations in physics.integrate_step with
     grav_turn=True and a_cmd_* from params applied as bias terms.
@@ -135,10 +138,10 @@ def _f_powered(s, u, p: Params, thrust_n: float, mdot: float):
 
     drag    = qS * p.cd              # powered-ascent drag
     lift    = qS * p.cl
-    a_max   = p.a_lat_max * G0
+    a_max   = a_max_fn(v) if a_max_fn is not None else p.a_lat_max * G0
     # Control drag (actuator penalty proportional to lateral demand²)
     a_lat2  = a_nV**2 + a_nH**2 + 1e-12
-    d_ctrl  = qS * p.cd_ctrl * (a_lat2 / a_max**2) if a_max > 0 else 0.0
+    d_ctrl  = qS * p.cd_ctrl * (a_lat2 / ca.fmax(a_max**2, 1.0)) if p.cd_ctrl > 0 else 0.0
     drag_t  = drag + d_ctrl
 
     # Gravity turn: thrust aligned with velocity (T_nV = T_nH = 0)
@@ -172,12 +175,14 @@ def _f_powered(s, u, p: Params, thrust_n: float, mdot: float):
     return ca.vertcat(dv, dgV, dgH, dh, dx, dy, dm)
 
 
-def _f_coast(s, u, p: Params, mass_bo: float):
+def _f_coast(s, u, p: Params, mass_bo: float, a_max_fn=None):
     """
     Continuous-time ODE for the COAST phase.
 
     s = [v, γV, γH, h, x, y]   (6-vector; mass fixed at burnout value)
     u = [a_nV, a_nH]            (m/s²)
+
+    a_max_fn : callable(v) → a_max_m_s2, or None (uses p.a_lat_max * G0).
     """
     v, gV, gH, h, x, y = (s[i] for i in range(6))
     a_nV, a_nH = u[0], u[1]
@@ -191,9 +196,9 @@ def _f_coast(s, u, p: Params, mass_bo: float):
 
     drag    = qS * p.cd_fall         # tumbling drag post-burnout
     lift    = qS * p.cl
-    a_max   = p.a_lat_max * G0
+    a_max   = a_max_fn(v) if a_max_fn is not None else p.a_lat_max * G0
     a_lat2  = a_nV**2 + a_nH**2 + 1e-12
-    d_ctrl  = qS * p.cd_ctrl * (a_lat2 / a_max**2) if a_max > 0 else 0.0
+    d_ctrl  = qS * p.cd_ctrl * (a_lat2 / ca.fmax(a_max**2, 1.0)) if p.cd_ctrl > 0 else 0.0
     drag_t  = drag + d_ctrl
 
     dv   = (-drag_t / mass - g * ca.sin(gV) + p.a_cmd_t)
@@ -404,6 +409,19 @@ def collocation_solve(
     y_t       = params.y_target  * 1_000.0
     z_t       = params.z_target  * 1_000.0
     a_max     = params.a_lat_max * G0
+
+    # ── Velocity-dependent a_max ──────────────────────────────────────────
+    # Build a CasADi interpolant if a_lat_max_table is provided.
+    # _a_max_fn(v) returns a_max in m/s² — works with both float and CasADi MX.
+    if params.a_lat_max_table is not None:
+        _v_bp = [float(r[0]) for r in params.a_lat_max_table]
+        _a_bp = [float(r[1]) * G0 for r in params.a_lat_max_table]
+        _interp = ca.interpolant('a_max_v', 'linear', [_v_bp], _a_bp)
+        def _a_max_fn(v_sym): return _interp(v_sym)
+        a_max_ref = float(max(_a_bp))   # peak value — for display / fallback only
+    else:
+        def _a_max_fn(v_sym): return a_max
+        a_max_ref = a_max
     mdot      = thrust_n / (params.isp * G0)
     prop_used = min(params.m_prop, mdot * params.burn_max)
     t_burn    = prop_used / mdot
@@ -457,11 +475,13 @@ def collocation_solve(
         opti.subject_to(S2[i, 0] == S1[i, N1])
 
     # ── Path constraints ──────────────────────────────────────────────────
-    # Control limits: circular bound  |u| ≤ a_max
+    # Control limits: circular bound  |u| ≤ a_max(v_k) at each node
     for k in range(N1 + 1):
-        opti.subject_to(U1[0, k]**2 + U1[1, k]**2 <= a_max**2)
+        a_k = _a_max_fn(S1[0, k])
+        opti.subject_to(U1[0, k]**2 + U1[1, k]**2 <= a_k**2)
     for k in range(N2 + 1):
-        opti.subject_to(U2[0, k]**2 + U2[1, k]**2 <= a_max**2)
+        a_k = _a_max_fn(S2[0, k])
+        opti.subject_to(U2[0, k]**2 + U2[1, k]**2 <= a_k**2)
 
     # Altitude ≥ 0 at nodes
     for k in range(N1 + 1):
@@ -497,10 +517,10 @@ def collocation_solve(
 
     # ── Dynamics constraints: Hermite-Simpson defects ─────────────────────
     def f1(s, u):
-        return _f_powered(s, u, params, thrust_n, mdot)
+        return _f_powered(s, u, params, thrust_n, mdot, a_max_fn=_a_max_fn)
 
     def f2(s, u):
-        return _f_coast(s, u, params, mass_bo)
+        return _f_coast(s, u, params, mass_bo, a_max_fn=_a_max_fn)
 
     for k in range(N1):
         d = _hs_defect(f1, S1[:, k], S1[:, k + 1], U1[:, k], U1[:, k + 1], h1)
@@ -514,19 +534,25 @@ def collocation_solve(
     x_f, y_f, h_f = S2[4, N2], S2[5, N2], S2[3, N2]
     gV_f, gH_f    = S2[1, N2], S2[2, N2]
 
-    # ── Control effort: ∫|u|²dt  (trapezoidal, normalised by a_max²) ─────
-    # Result is dimensionless: 1.0 ≡ saturating both channels the whole flight.
-    ctrl_norm = a_max**2 if a_max > 0 else 1.0
+    # ── Control effort: ∫|u|²/a_max(v)²dt  (trapezoidal) ────────────────
+    # Each node's contribution is normalised by its own velocity-dependent
+    # a_max so the cost is dimensionless: 1.0 ≡ saturating the limit the
+    # whole flight.  When a_lat_max_table is None, a_max is constant and
+    # this reduces to the original formulation.
     ctrl_effort = ca.MX(0)
     for k in range(N1):
+        ak  = ca.fmax(_a_max_fn(S1[0, k]),   1.0)   # guard against zero
+        ak1 = ca.fmax(_a_max_fn(S1[0, k+1]), 1.0)
         ctrl_effort = ctrl_effort + 0.5 * h1 * (
-            (U1[0, k]**2 + U1[1, k]**2 + U1[0, k+1]**2 + U1[1, k+1]**2)
-            / ctrl_norm
+            (U1[0, k]**2   + U1[1, k]**2)   / ak**2 +
+            (U1[0, k+1]**2 + U1[1, k+1]**2) / ak1**2
         )
     for k in range(N2):
+        ak  = ca.fmax(_a_max_fn(S2[0, k]),   1.0)
+        ak1 = ca.fmax(_a_max_fn(S2[0, k+1]), 1.0)
         ctrl_effort = ctrl_effort + 0.5 * h2 * (
-            (U2[0, k]**2 + U2[1, k]**2 + U2[0, k+1]**2 + U2[1, k+1]**2)
-            / ctrl_norm
+            (U2[0, k]**2   + U2[1, k]**2)   / ak**2 +
+            (U2[0, k+1]**2 + U2[1, k+1]**2) / ak1**2
         )
 
     # ── Hit-line mode vs point-target fallback ────────────────────────────

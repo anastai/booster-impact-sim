@@ -85,6 +85,11 @@ class Params:
     # ── Simulation stop conditions ───────────────────────────────────────
     v_min_stop:   float | None = None  # stop when speed drops below this after burnout (m/s)
                                         # None = disabled
+    # ── Velocity-dependent acceleration limit ────────────────────────────
+    a_lat_max_table: list | None = None
+    # If set: [(v1_m/s, a1_g), (v2_m/s, a2_g), ...] sorted by ascending v.
+    # collocate.py interpolates a_max at each node's speed.
+    # Overrides a_lat_max in the optimizer; a_lat_max still used by simulate().
 
 
 # ---------------------------------------------------------------------------
