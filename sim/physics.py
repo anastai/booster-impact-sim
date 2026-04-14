@@ -82,6 +82,9 @@ class Params:
                                        # e.g. 45 = hit from the NE
     hit_angle_range: float | None = None  # range from target at which angle law activates (km)
                                           # None = active throughout entire post-burnout flight
+    # ── Simulation stop conditions ───────────────────────────────────────
+    v_min_stop:   float | None = None  # stop when speed drops below this after burnout (m/s)
+                                        # None = disabled
 
 
 # ---------------------------------------------------------------------------

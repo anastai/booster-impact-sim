@@ -70,7 +70,8 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
     burnout_h         = 0.0
     burnout_t         = 0.0
     burnout_gamma_v   = gV0
-    passed_above_target = (z_target_m <= 0.0)
+    above_target_alt = False   # True once vehicle has climbed above z_target + 50 m
+    armed            = False   # True once vehicle has moved > 500 m from target
 
     # ── Main loop ──────────────────────────────────────────────────────────
     for i in range(_MAX_STEPS):
@@ -112,6 +113,13 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
         if lift > max_lift:
             max_lift = lift
 
+        # ── Range to target (used by guidance, arming, and termination) ──────
+        r_to_target = math.sqrt(
+            (state.x - x_target_m)**2 +
+            (state.y - y_target_m)**2 +
+            (state.h - z_target_m)**2
+        )
+
         # ── IACPN guidance ────────────────────────────────────────────────────
         # During powered flight: yaw channel only (a_nH) — heading is corrected
         # toward the target while pitch (a_nV) is left to the gravity turn.
@@ -121,11 +129,6 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
             a_drag_t = -(0.5 * rho * spd * spd * Aref * cd_now_guidance) / state.mass
 
             # Range gate: angle correction only activates within hit_angle_range of target
-            r_to_target = math.sqrt(
-                (state.x - x_target_m)**2 +
-                (state.y - y_target_m)**2 +
-                (state.h - z_target_m)**2
-            )
             hit_angle_range_m = (params.hit_angle_range * 1_000.0
                                  if params.hit_angle_range is not None else None)
             angle_law_active = (hit_angle_range_m is None or
@@ -199,11 +202,24 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
         if spd     > max_v: max_v = spd
 
         # ── Termination ───────────────────────────────────────────────────
+        # Gate: vehicle must rise 50 m above target altitude before floor stop activates
         if state.h > z_target_m + 50.0:
-            passed_above_target = True
-        if passed_above_target and state.h <= z_target_m:
+            above_target_alt = True
+        # Arm 3-D proximity check once vehicle has moved > 500 m from target
+        if r_to_target > 500.0:
+            armed = True
+
+        # (1) 3-D proximity — primary stop for on-target approaches and
+        #     backwards trajectories that loop back to the target
+        if armed and r_to_target < 100.0:
             break
-        if state.h <= min(0.0, z_target_m):
+        # (2) Altitude floor — catches vehicles that miss horizontally and hit ground
+        if above_target_alt and state.h <= z_target_m:
+            break
+        # (3) Stalled post-burnout — vehicle can no longer reach target
+        if (params.v_min_stop is not None
+                and not state.engine_on
+                and state.v < params.v_min_stop):
             break
 
     # ── Miss distance ──────────────────────────────────────────────────────
