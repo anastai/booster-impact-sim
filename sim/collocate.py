@@ -56,7 +56,18 @@ Merit function
     The booster must land anywhere on this line (offset s is a free NLP
     variable) with angle error ≤ angle_tol_deg on both channels.
 
-      J = w_ctrl · ∫|u|²dt / a_max²   +   w_time · T_f
+      J = w_ctrl · ctrl_effort(pct_mean)
+        − w_final_line · FinalLine_km
+        + w_time · T_f
+
+    FinalLine: arc length of the terminal approach segment where BOTH γV
+    and γH are within final_line_tol_deg of the desired angles (default 3°).
+    Added to J as a quadratic angle penalty over the last final_line_nodes nodes:
+      penalty = Σ_{k=N2−M}^{N2} exp(0.2·(k−N2)) · (err_gV² + err_gH_cos²) / tol²
+    Quadratic gradients are well-conditioned: err→0 at solution → gradient→0
+    naturally, giving IPOPT clean convergence (unlike sigmoid merit terms).
+    The actual FinalLine arc length (exact, hard 3° threshold) is computed in
+    post-processing and reported in summary['final_line_km'].
 
     Terminal constraints (hard):
       x_f = x_t + s·d̂_x,  y_f = y_t + s·d̂_y,  h_f = z_t + s·d̂_z
@@ -358,10 +369,14 @@ def collocation_solve(
     N2:                  int        = 30,
     tf_guess:            float|None = None,
     # ── Hit-line merit (active when both hit_gamma_v and hit_gamma_h are set) ──
-    angle_tol_deg:       float      = 5.0,
-    hit_line_range_max:  float      = 50.0,   # km — max |s| along the line
-    w_ctrl:              float      = 1.0,    # weight on ∫|u|²dt / a_max²
-    w_time:              float      = 1e-3,
+    angle_tol_deg:          float      = 5.0,
+    hit_line_range_max:     float      = 50.0,   # km — max |s| along the line
+    w_ctrl:                 float      = 1.0,    # weight on ctrl_effort
+    w_time:                 float      = 1e-3,
+    # ── FinalLine (hit-line mode only) ───────────────────────────────────────
+    w_final_line:           float      = 0.1,    # weight on quadratic approach-angle penalty
+    final_line_tol_deg:     float      = 3.0,    # angle tolerance for FinalLine post-processing (deg)
+    final_line_nodes:       int        = 10,     # how many terminal coast nodes are penalized
     # ── Point-target merit (fallback when angle constraints absent) ────────────
     w_miss:              float      = 1.0,
     w_angle_v:           float      = 0.01,
@@ -384,15 +399,19 @@ def collocation_solve(
     tf_guess           : Initial guess for total flight time (s). Estimated if None.
     angle_tol_deg      : Angle tolerance for hit-line mode (deg). Default 5.
     hit_line_range_max : Max signed offset |s| along the hit line (km). Default 50.
-    w_ctrl             : Weight on normalised control effort ∫|u|²dt/a_max².
+    w_ctrl             : Weight on ctrl_effort (softplus mean % of limiter).
     w_time             : Weight on total flight time.
+    w_final_line       : Enable FinalLine (hit-line mode). Any value > 0 activates
+                         hard angle constraints on the last final_line_nodes coast
+                         nodes. 0 = disabled (only terminal node constrained).
+    final_line_tol_deg : Angle tolerance for the final approach segment (deg).
+                         Both γV and γH must stay within this. Default 3°.
+    final_line_nodes   : Number of terminal coast-phase nodes that must satisfy
+                         the final-approach angle. Default 5.
     w_miss             : (point-target fallback) Weight on miss².
     w_angle_v          : (point-target fallback) Weight on γV error².
     w_angle_h          : (point-target fallback) Weight on γH error².
     w_miss_soft        : Weight on softplus miss penalty (both modes). 0 = disabled.
-                         Shape: ≈0 below miss_deadzone, ≈50 at deadzone+400 m, then linear.
-                         In hit-line mode miss = |s| (offset along line from nominal target).
-                         In point-target mode miss = Euclidean distance to target.
     miss_deadzone      : Dead-zone radius (m). No penalty for miss < miss_deadzone.
     warm_start         : 'iacpn' — interpolate IACPN reference run onto nodes.
                          'linear' — simple straight-line interpolation.
@@ -636,8 +655,35 @@ def collocation_solve(
         # Heading: cos(Δγ_H) ≥ cos(tol) handles the ±180° wrap cleanly
         opti.subject_to(ca.cos(gH_f - gH_des) >= math.cos(angle_tol_rad))
 
-        # Objective: minimise control effort + flight time + optional soft miss
+        # ── FinalLine: quadratic angle penalty over last final_line_nodes ───────
+        # Adds a terminal-weighted quadratic penalty for angle deviation over
+        # the last `final_line_nodes` coast-phase nodes.  This drives the optimizer
+        # to maintain the correct approach angle for a longer final segment.
+        #
+        # Formulation:
+        #   err_gV_k  = gV_k − gV_des                          (rad)
+        #   err_gH_k  = 1 − cos(gH_k − gH_des)                (cosine-space, wrap-safe)
+        #   weight_k  = exp(0.2·(k − N2))                      (1 at terminal, decays back)
+        #   penalty   = Σ weight_k·(err_gV_k² + err_gH_k²) / tol²
+        #
+        # Quadratic gradients are well-conditioned: near the solution err→0 so
+        # gradient→0 naturally, giving IPOPT clean KKT conditions.
+        # The tol² normalization makes the penalty ≈ 1 when err = final_line_tol.
+        if w_final_line > 0 and final_line_nodes > 0:
+            _tol_fl    = math.radians(final_line_tol_deg)
+            _k_start   = max(0, N2 - final_line_nodes)
+            _angle_pen = ca.MX(0.0)
+            for _k in range(_k_start, N2 + 1):
+                _err_gV = S2[1, _k] - gV_des
+                _err_gH = 1.0 - ca.cos(S2[2, _k] - gH_des)   # cosine-space
+                _wt     = math.exp(0.2 * (_k - N2))           # terminal-weighted
+                _angle_pen = _angle_pen + _wt * (_err_gV**2 + _err_gH**2)
+            _angle_pen = _angle_pen / (_tol_fl ** 2)           # normalize by tol²
+
+        # Objective: minimise control effort + final-approach angle error + flight time
         J = w_ctrl * ctrl_effort + w_time * T_f
+        if w_final_line > 0 and final_line_nodes > 0:
+            J = J + w_final_line * _angle_pen
         if w_miss_soft > 0:
             # In hit-line mode, miss = |s| (signed offset along approach line)
             J = J + w_miss_soft * _miss_merit(ca.fabs(s))
@@ -678,6 +724,7 @@ def collocation_solve(
         'ipopt.max_iter':        600,
         'ipopt.tol':             1e-6,
         'ipopt.acceptable_tol':  1e-4,
+        'ipopt.acceptable_iter': 10,
         'ipopt.mu_strategy':     'adaptive',
         'ipopt.nlp_scaling_method': 'gradient-based',
         'print_time':            False,
@@ -762,6 +809,25 @@ def collocation_solve(
         summary['gamma_v_err_deg']    = round(gV_err_out, 3)
         summary['gamma_h_err_deg']    = round(gH_err_out, 3)
         summary['angle_satisfied']    = angle_ok
+
+        # ── FinalLine (exact, hard threshold on solved trajectory) ──────────
+        # Count contiguous nodes from terminal backward where both angles in tol.
+        gV_des_fl  = math.radians(params.hit_gamma_v)
+        gH_des_fl  = math.radians(params.hit_gamma_h)
+        tol_fl_rad = math.radians(final_line_tol_deg)
+        dt_coast   = (T_f_s - t_burn) / N2
+        fl_m = 0.0
+        for _k in range(N2, 0, -1):
+            _gv = float(S2_s[1, _k])
+            _gh = float(S2_s[2, _k])
+            _dh = (_gh - gH_des_fl + math.pi) % (2 * math.pi) - math.pi
+            if abs(_gv - gV_des_fl) <= tol_fl_rad and abs(_dh) <= tol_fl_rad:
+                fl_m += float(S2_s[0, _k]) * dt_coast
+            else:
+                break   # contiguous from terminal — stop at first out-of-tol node
+        summary['final_line_km']     = round(fl_m / 1_000, 3)
+        summary['final_line_tol_deg'] = final_line_tol_deg
+
     elif params.hit_gamma_v is not None:
         summary['gamma_v_err_deg']    = round(gV_err_out, 3)
     elif params.hit_gamma_h is not None:
