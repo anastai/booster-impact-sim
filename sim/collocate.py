@@ -542,27 +542,6 @@ def collocation_solve(
     x_f, y_f, h_f = S2[4, N2], S2[5, N2], S2[3, N2]
     gV_f, gH_f    = S2[1, N2], S2[2, N2]
 
-    # ── Control effort: ∫|u|²/a_max(v)²dt  (trapezoidal) ────────────────
-    # Each node's contribution is normalised by its own velocity-dependent
-    # a_max so the cost is dimensionless: 1.0 ≡ saturating the limit the
-    # whole flight.  When a_lat_max_table is None, a_max is constant and
-    # this reduces to the original formulation.
-    ctrl_effort = ca.MX(0)
-    for k in range(N1):
-        ak  = ca.fmax(_a_max_fn(S1[0, k]),   1.0)   # guard against zero
-        ak1 = ca.fmax(_a_max_fn(S1[0, k+1]), 1.0)
-        ctrl_effort = ctrl_effort + 0.5 * h1 * (
-            (U1[0, k]**2   + U1[1, k]**2)   / ak**2 +
-            (U1[0, k+1]**2 + U1[1, k+1]**2) / ak1**2
-        )
-    for k in range(N2):
-        ak  = ca.fmax(_a_max_fn(S2[0, k]),   1.0)
-        ak1 = ca.fmax(_a_max_fn(S2[0, k+1]), 1.0)
-        ctrl_effort = ctrl_effort + 0.5 * h2 * (
-            (U2[0, k]**2   + U2[1, k]**2)   / ak**2 +
-            (U2[0, k+1]**2 + U2[1, k+1]**2) / ak1**2
-        )
-
     # ── Softplus: f(x) = log(1 + exp(x)) ────────────────────────────────
     # Standard mathematical softplus, numerically stable for large x.
     # Direct formula log(1+exp(x)) overflows for x > ~710 in float64.
@@ -570,6 +549,46 @@ def collocation_solve(
     # tail for x > 50.  Result is identical to log(1+exp(x)) everywhere.
     def _softplus(x):
         return ca.log(1.0 + ca.exp(ca.fmin(x, 50.0))) + ca.fmax(x - 50.0, 0.0)
+
+    # ── Control effort: mean |u_k|/a_max(v_k) across all nodes (%) ──────
+    # pct_k = |u_k| / a_max(v_k) * 100  — how far each node is from its limit
+    # pct_mean = mean(pct_k) over all N1+1 + N2+1 nodes
+    #
+    # Penalty shape (two-term softplus):
+    #   pct < 50 % : ≈ 0          (dead zone)
+    #   pct = 80 % : ≈ 100        (calibrated)
+    #   pct = 95 % : ≈ 900
+    #   pct = 100% : ≈ 1 668      (very large)
+    #
+    # Term 1 — gradual softplus from 50%:
+    #   a1 * (softplus(pct - 50) - log2)   calibrated so term1(80) = 100
+    # Term 2 — steep softplus near 100%:
+    #   a2 * softplus(β2 * (pct - 90))     essentially 0 below ~85%, steep above
+    _log2 = math.log(2.0)
+    _a1   = 100.0 / (math.log(1.0 + math.exp(30.0)) - _log2)   # ≈ 3.412
+    _a2   = 100.0
+    _beta2 = 1.5
+
+    def _ctrl_merit(pct):
+        """Softplus penalty on mean control effort percentage (0–100)."""
+        term1 = _a1  * (_softplus(pct - 50.0) - _log2)
+        term2 = _a2  *  _softplus(_beta2 * (pct - 90.0))
+        return term1 + term2
+
+    # Accumulate pct_k = |u_k| / a_max_k * 100 at every node
+    _n_nodes = (N1 + 1) + (N2 + 1)
+    _pct_sum = ca.MX(0)
+    for k in range(N1 + 1):
+        u_mag = ca.sqrt(U1[0, k]**2 + U1[1, k]**2 + 1e-8)
+        ak    = ca.fmax(_a_max_fn(S1[0, k]), 1.0)
+        _pct_sum = _pct_sum + u_mag / ak * 100.0
+    for k in range(N2 + 1):
+        u_mag = ca.sqrt(U2[0, k]**2 + U2[1, k]**2 + 1e-8)
+        ak    = ca.fmax(_a_max_fn(S2[0, k]), 1.0)
+        _pct_sum = _pct_sum + u_mag / ak * 100.0
+
+    pct_mean    = _pct_sum / _n_nodes
+    ctrl_effort = _ctrl_merit(pct_mean)
 
     # miss_merit uses softplus shifted so it is exactly 0 at the dead-zone
     # boundary: softplus(0) = log(2), so softplus(x) - log(2) = 0 at x = 0.
