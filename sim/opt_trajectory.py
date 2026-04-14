@@ -213,7 +213,6 @@ def _sim_eval_fast(
     cd_fall       = params.cd_fall
     cl            = params.cl
     cd_ctrl       = params.cd_ctrl
-    a_cmd_t       = params.a_cmd_t
     a_cmd_nv      = params.a_cmd_nv
     a_cmd_nh      = params.a_cmd_nh
     m_pay_str     = params.m_pay + params.m_str
@@ -303,7 +302,7 @@ def _sim_eval_fast(
         sin_gV = math.sin(gV)
         cos_gV = math.cos(gV)
 
-        dv_dt = (T_t - drag_tot) / mass - grav * sin_gV + a_cmd_t
+        dv_dt = (T_t - drag_tot) / mass - grav * sin_gV
 
         if rotation_active:
             dgV_dt = ((T_nV + lift) / (mass * spd_safe)

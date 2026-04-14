@@ -148,7 +148,7 @@ def _f_powered(s, u, p: Params, thrust_n: float, mdot: float, a_max_fn=None):
     T_t = thrust_n
 
     # Velocity-frame ODEs (see physics.py for derivation)
-    dv   = (T_t - drag_t) / mass - g * ca.sin(gV) + p.a_cmd_t
+    dv   = (T_t - drag_t) / mass - g * ca.sin(gV)
 
     # Angle rates are singular at v=0 (g*cos(gV)/v → ∞).
     # Clamp the denominator speed to max(v, v_thresh) in the angle-rate
@@ -201,7 +201,7 @@ def _f_coast(s, u, p: Params, mass_bo: float, a_max_fn=None):
     d_ctrl  = qS * p.cd_ctrl * (a_lat2 / ca.fmax(a_max**2, 1.0)) if p.cd_ctrl > 0 else 0.0
     drag_t  = drag + d_ctrl
 
-    dv   = (-drag_t / mass - g * ca.sin(gV) + p.a_cmd_t)
+    dv   = (-drag_t / mass - g * ca.sin(gV))
 
     # Same singularity fix as powered phase
     _v_thresh = max(p.grav_turn_v_min, 1.0)

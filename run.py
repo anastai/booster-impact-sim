@@ -29,7 +29,6 @@ params = Params(
     # ── Velocity-frame dynamics ───────────────────────
     grav_turn       = True,  # gravity turn ON
     grav_turn_v_min = 30.0,  # hold fixed angle until v ≥ 30 m/s
-    a_cmd_t         = 0.0,   # tangential accel command  (m/s²)
     a_cmd_nv        = 0.0,   # pitch-normal accel command (m/s²)
     a_cmd_nh        = 0.0,   # yaw-normal accel command   (m/s²)
     # ── IACPN guidance target ─────────────────────────

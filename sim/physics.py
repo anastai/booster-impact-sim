@@ -21,7 +21,7 @@ The three orthogonal velocity-frame axes are:
 
 Equations of motion
 -------------------
-  m · (dv/dt)               = T_t  − D  − m·g·sin(γV)  + m·a_cmd_t
+  m · (dv/dt)               = T_t  − D  − m·g·sin(γV)
   m · v · (dγV/dt)          = T_nV + L  − m·g·cos(γV)  + m·a_cmd_nV + m·a_zem_nV
   m · v · cos(γV) · (dγH/dt)= T_nH               + m·a_cmd_nH + m·a_zem_nH
 """
@@ -67,7 +67,6 @@ class Params:
     grav_turn_v_min: float = 30.0   # speed threshold to activate gravity-turn rotation (m/s)
                                      # Below this, angle is held fixed even when grav_turn=True.
                                      # Matches real-rocket "fly straight until minimum speed" logic.
-    a_cmd_t:      float = 0.0       # constant tangential    cmd  (m/s²)  (NEW)
     a_cmd_nv:     float = 0.0       # constant pitch-normal  cmd  (m/s²)  (NEW)
     a_cmd_nh:     float = 0.0       # constant yaw-normal    cmd  (m/s²)  (NEW)
     # ── Guidance target ──────────────────────────────────────────────────
@@ -205,7 +204,7 @@ def integrate_step(
     drag_tot = drag_aero + drag_ctrl
 
     # ── Velocity-frame ODEs ────────────────────────────────────────────────
-    dv_dt  = (T_t - drag_tot) / state.mass - grav * math.sin(gV) + params.a_cmd_t
+    dv_dt  = (T_t - drag_tot) / state.mass - grav * math.sin(gV)
 
     # Only apply pitch/yaw rotation when above minimum speed.
     # Below grav_turn_v_min (in grav-turn mode) the body angle is held fixed,
