@@ -73,7 +73,7 @@ class Params:
     x_target:     float = 100.0     # target downrange   (km)
     y_target:     float = 0.0       # target crossrange  (km)
     z_target:     float = 0.0       # target altitude    (km)
-    a_lat_max:    float = 1.0       # max lateral accel limit  (g)
+    a_lat_max:    float = 20.0      # max lateral accel limit  (g)
     # ── Impact angle constraints (None = unconstrained) ──────────────────
     hit_gamma_v:  float | None = None  # desired impact flight-path angle (deg)
                                        # e.g. -70 = steep near-vertical dive
