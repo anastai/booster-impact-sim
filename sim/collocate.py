@@ -50,36 +50,27 @@ smooth (at least C¹) functions for IPOPT's interior-point solver.
 
 Merit function
 --------------
-  Hit-line mode  (both hit_gamma_v AND hit_gamma_h set in params):
-    A line is drawn through the target point in the desired impact direction
-    d̂ = (cos γV_des·cos γH_des,  cos γV_des·sin γH_des,  sin γV_des).
-    The booster must land anywhere on this line (offset s is a free NLP
-    variable) with angle error ≤ angle_tol_deg on both channels.
+  Unified four-component objective (same structure for both modes):
 
-      J = w_ctrl · ctrl_effort(pct_mean)
-        − w_final_line · FinalLine_km
-        + w_time · T_f
+      J = w_ctrl      · ControlEffortMerit(pct_mean)
+        + w_miss      · MissMerit(miss_m²)
+        + w_time      · FlightTimeMerit(T_f)
+        + w_final_line· FinalLineMerit(FL_smooth)
 
-    FinalLine: arc length of the terminal approach segment where BOTH γV
-    and γH are within final_line_tol_deg of the desired angles (default 3°).
-    Reported in summary['final_line_km'] (exact post-processing metric).
+  ControlEffortMerit: softplus penalty on mean control usage (% of limit).
+  MissMerit:          squared miss distance m².
+                      Hit-line mode  → miss_m = |s|  (offset along approach line).
+                      Point-target   → miss_m = ‖pos_f − pos_target‖.
+                      Default w_miss = 0 (hit-line) or 1 (point-target).
+  FlightTimeMerit:    total flight time T_f.
+  FinalLineMerit:     quartic-ReLU penalty on short FinalLine approach segment.
+                      50·max(0, D − FL_smooth)⁴.  Meaningful only in hit-line mode.
 
-    In-optimizer: quadratic weighted-angle penalty at the last
-    `final_line_nodes` coast nodes (exponential decay toward terminal):
-      J += w_final_line · Σ_k exp(decay·(k−N2)) · [(γV_k − γV_des)² + cos²(γV_des)·(1−cos(γH_k−γH_des))²]
-    This extends the correct-approach-angle window backward along the trajectory.
-    Quadratic (not sigmoid) avoids local KKT traps and converges cleanly.
-
-    Terminal constraints (hard):
+  Terminal constraints for hit-line mode (hard, not in objective):
       x_f = x_t + s·d̂_x,  y_f = y_t + s·d̂_y,  h_f = z_t + s·d̂_z
       |γV_f − γV_des| ≤ angle_tol_deg
-      |γH_f − γH_des| ≤ angle_tol_deg   (handled via cos(Δγ_H) ≥ cos(tol))
-
-    Output key: 'hit_line_offset_m' = s  (signed distance from nominal target)
-
-  Point-target mode  (original, backward compatible, angle constraint absent):
-      J = w_miss · miss_m²  +  w_angle_v · γV_err²  +  w_angle_h · γH_err²
-        + w_time · T_f
+      cos(γH_f − γH_des) ≥ cos(angle_tol_deg)
+      Output key: 'hit_line_offset_m' = s  (signed distance from nominal target)
 
 Warm start
 ----------
@@ -369,23 +360,17 @@ def collocation_solve(
     N1:                  int        = 15,
     N2:                  int        = 30,
     tf_guess:            float|None = None,
-    # ── Hit-line merit (active when both hit_gamma_v and hit_gamma_h are set) ──
     angle_tol_deg:          float      = 5.0,
     hit_line_range_max:     float      = 50.0,   # km — max |s| along the line
-    w_ctrl:                 float      = 1.0,    # weight on ctrl_effort
-    w_time:                 float      = 1e-3,
-    # ── FinalLine (hit-line mode only) ───────────────────────────────────────
-    w_final_line:           float      = 0.1,    # weight on FinalLine softplus penalty
+    # ── Four merit weights (same structure for both modes) ───────────────────
+    w_ctrl:                 float      = 1.0,    # ControlEffortMerit weight
+    w_miss:           float|None       = None,   # MissMerit weight  (auto: 0 hit-line, 1 point-target)
+    w_time:                 float      = 1e-3,   # FlightTimeMerit weight
+    w_final_line:           float      = 0.1,    # FinalLineMerit weight (0 = disabled)
+    # ── FinalLine options ────────────────────────────────────────────────────
     final_line_tol_deg:     float      = 3.0,    # angle tolerance for FinalLine (deg)
     final_line_nodes:       int        = 10,     # terminal coast nodes in FL smooth proxy
     final_line_deadzone_km: float      = 1.0,    # FL above this → no penalty (km)
-    # ── Point-target merit (fallback when angle constraints absent) ────────────
-    w_miss:              float      = 1.0,
-    w_angle_v:           float      = 0.01,
-    w_angle_h:           float      = 0.01,
-    # ── Soft miss penalty (both modes) ───────────────────────────────────────
-    w_miss_soft:         float      = 0.0,    # 0 = disabled (backward compat)
-    miss_deadzone:       float      = 100.0,  # m — no penalty below this miss
     # ── Solver options ────────────────────────────────────────────────────────
     warm_start:          str        = 'iacpn',
     ipopt_opts:          dict|None  = None,
@@ -399,24 +384,24 @@ def collocation_solve(
     N1                 : Hermite-Simpson segments in powered phase (default 15).
     N2                 : Hermite-Simpson segments in coast phase   (default 30).
     tf_guess           : Initial guess for total flight time (s). Estimated if None.
-    angle_tol_deg      : Angle tolerance for hit-line mode (deg). Default 5.
+    angle_tol_deg      : Hard angle tolerance at terminal node for hit-line mode (deg). Default 5.
     hit_line_range_max : Max signed offset |s| along the hit line (km). Default 50.
-    w_ctrl             : Weight on ctrl_effort (softplus mean % of limiter).
-    w_time             : Weight on total flight time.
-    w_final_line          : Weight on FinalLine quartic-ReLU penalty (hit-line mode).
-                            Penalises SHORT FinalLine via 50·max(0, D−FL_smooth)⁴.
-                            Dead zone: FL ≥ D → 0.  Below: ~50 at D−1 km, ~253 at D−1.5 km.
-                            Set w_final_line = 0 to disable. Default 0.1.
-    final_line_tol_deg    : Angle tolerance for both the sigmoid proxy and the exact
-                            FinalLine metric (deg). Default 3°.
-    final_line_nodes      : Terminal coast nodes in sigmoid FL proxy. Default 10.
-    final_line_deadzone_km: FL above this → zero penalty (km). Set to the achievable
-                            FinalLine for the vehicle; default 1.0 km.
-    w_miss             : (point-target fallback) Weight on miss².
-    w_angle_v          : (point-target fallback) Weight on γV error².
-    w_angle_h          : (point-target fallback) Weight on γH error².
-    w_miss_soft        : Weight on softplus miss penalty (both modes). 0 = disabled.
-    miss_deadzone      : Dead-zone radius (m). No penalty for miss < miss_deadzone.
+
+    Merit weights — same four components for both modes:
+    w_ctrl             : ControlEffortMerit — softplus penalty on mean control usage.
+    w_miss             : MissMerit — squared miss distance (m²).
+                         Default 0.0 in hit-line mode (position is free on the approach line);
+                         Default 1.0 in point-target mode (drives vehicle to target).
+    w_time             : FlightTimeMerit — total flight time T_f.
+    w_final_line       : FinalLineMerit — quartic-ReLU penalty on short FinalLine.
+                         50·max(0, D−FL_smooth)⁴.  Set to 0 to disable. Default 0.1.
+                         Only meaningful in hit-line mode; effectively 0 otherwise.
+
+    FinalLine options:
+    final_line_tol_deg    : Angle tolerance for FinalLine metric and sigmoid proxy (deg). Default 3°.
+    final_line_nodes      : Terminal coast nodes used in sigmoid FL proxy. Default 10.
+    final_line_deadzone_km: FL above this → zero FinalLine penalty. Default 1.0 km.
+
     warm_start         : 'iacpn' — interpolate IACPN reference run onto nodes.
                          'linear' — simple straight-line interpolation.
     ipopt_opts         : Extra IPOPT options dict (overrides defaults).
@@ -613,26 +598,11 @@ def collocation_solve(
     pct_mean    = _pct_sum / _n_nodes
     ctrl_effort = _ctrl_merit(pct_mean)
 
-    # miss_merit uses softplus shifted so it is exactly 0 at the dead-zone
-    # boundary: softplus(0) = log(2), so softplus(x) - log(2) = 0 at x = 0.
-    #
-    # miss_merit(miss) = scale * (softplus(miss - deadzone) - log(2))
-    #   = 0      at miss = miss_deadzone            (exact)
-    #   ≈ 0      for miss < miss_deadzone            (dead zone)
-    #   ≈ 50     at miss = miss_deadzone + 400 m
-    #   grows linearly beyond that
-    _sp_scale = 50.0 / (400.0 + math.log(1.0 + math.exp(-400.0)))  # ≈ 0.125
-
-    def _miss_merit(miss_m):
-        return _sp_scale * (_softplus(miss_m - miss_deadzone) - math.log(2.0))
-
-    # ── Hit-line mode vs point-target fallback ────────────────────────────
+    # ── Terminal constraints (mode-specific) ─────────────────────────────────
     hit_line_mode = (params.hit_gamma_v is not None and
                      params.hit_gamma_h is not None)
 
     if hit_line_mode:
-        # ── HIT-LINE formulation ───────────────────────────────────────────
-        # Direction unit vector along the desired approach line
         gV_des = math.radians(params.hit_gamma_v)
         gH_des = math.radians(params.hit_gamma_h)
         d_x = math.cos(gV_des) * math.cos(gH_des)
@@ -648,95 +618,74 @@ def collocation_solve(
         opti.subject_to(s >= -hit_line_range_max_m)
         opti.subject_to(s <=  hit_line_range_max_m)
 
-        # Terminal position must lie exactly on the hit line
+        # Terminal position constrained to approach line
         opti.subject_to(x_f == x_t + s * d_x)
         opti.subject_to(y_f == y_t + s * d_y)
         opti.subject_to(h_f == z_t + s * d_z)
 
-        # Hard angle tolerance constraints
+        # Hard angle tolerance at terminal node
         opti.subject_to(gV_f - gV_des <=  angle_tol_rad)
         opti.subject_to(gV_des - gV_f <=  angle_tol_rad)
-        # Heading: cos(Δγ_H) ≥ cos(tol) handles the ±180° wrap cleanly
         opti.subject_to(ca.cos(gH_f - gH_des) >= math.cos(angle_tol_rad))
 
-        # ── FinalLine approach-alignment penalty ─────────────────────────────
-        # Penalises approach trajectories where the velocity vector deviates
-        # from the desired hit angles in the final segment of flight.
-        #
-        # Formulation: exponential-weighted sigmoid scores over the last
-        # `final_line_nodes` coast nodes.  Each node contributes a smooth
-        # "in-tolerance" score that multiplies the node's speed × step size
-        # to approximate the segment length with correct approach angle.
-        #
-        #   score_k = σ(β·(tol_gV − |ΔγV_k|)) · σ(β·(tol_cos − (1−cos(ΔγH_k))))
-        #   FL_smooth = Σ_k exp(decay·(k−N2)) · score_k · v_k · h2 / 1000   (km)
-        #
-        # Penalty on the smooth FL proxy (quartic ReLU dead zone):
-        #   pen(FL) = A · max(0, D − FL_smooth)⁴
-        #
-        # Shape (A = 50, D = final_line_deadzone_km):
-        #   FL ≥ D km  →  0 (exact dead zone, zero gradient)
-        #   FL = D−1   →  50        FL = D−1.5 km  →  ≈ 253
-        #   FL = 0     →  50·D⁴    (huge for D > 1)
-        #
-        # Note: the sigmoid proxy has dual infeasibility ~8.7e-4 at the trivial
-        # local KKT, which is above the acceptable_tol = 1e-4 threshold — IPOPT
-        # naturally escapes the trivial solution and finds the real optimum.
-        # The exact FinalLine (hard 3° threshold) is reported in summary['final_line_km'].
-        _A_fl = 50.0
-        _D    = final_line_deadzone_km
-        _tol_fl     = math.radians(final_line_tol_deg)
-        _tol_fl_cos = 1.0 - math.cos(_tol_fl)
-        _beta_fl    = 30.0    # sigmoid sharpness (rad⁻¹)
-        _decay_fl   = 0.3     # exponential decay per node step
-
-        def _sig(x):
-            return 1.0 / (1.0 + ca.exp(-x))
-
-        def _fl_penalty(fl_km):
-            """Quartic ReLU penalty on FinalLine shortfall below dead zone."""
-            deficit = ca.fmax(ca.MX(0.0), _D - fl_km)
-            return _A_fl * deficit ** 4
-
-        if w_final_line > 0 and final_line_nodes > 0:
-            _k_start   = max(0, N2 - final_line_nodes)
-            _fl_smooth = ca.MX(0.0)
-            for _k in range(_k_start + 1, N2 + 1):
-                _gV_k   = S2[1, _k]
-                _gH_k   = S2[2, _k]
-                _v_k    = S2[0, _k]
-                _wt     = math.exp(_decay_fl * (_k - N2))
-                _sc_v   = _sig(_beta_fl * (_tol_fl     - ca.fabs(_gV_k - gV_des)))
-                _sc_h   = _sig(_beta_fl * (_tol_fl_cos - (1.0 - ca.cos(_gH_k - gH_des))))
-                _fl_smooth = _fl_smooth + _wt * _sc_v * _sc_h * _v_k * h2 / 1_000.0
-
-        # Objective: minimise control effort + FinalLine penalty + flight time
-        J = w_ctrl * ctrl_effort + w_time * T_f
-        if w_final_line > 0 and final_line_nodes > 0:
-            J = J + w_final_line * _fl_penalty(_fl_smooth)
-        if w_miss_soft > 0:
-            # In hit-line mode, miss = |s| (signed offset along approach line)
-            J = J + w_miss_soft * _miss_merit(ca.fabs(s))
-
+        # MissMerit input: squared offset along approach line
+        miss_m_sq = s ** 2
     else:
-        # ── POINT-TARGET formulation (backward compatible) ─────────────────
-        miss_sq = (x_f - x_t)**2 + (y_f - y_t)**2 + (h_f - z_t)**2
-        J = w_miss * miss_sq + w_time * T_f
-        if w_miss_soft > 0:
-            miss_m = ca.sqrt(miss_sq + 1e-4)   # sqrt(ε) avoids gradient singularity at 0
-            J = J + w_miss_soft * _miss_merit(miss_m)
+        # Point-target: no hard terminal constraints — position driven by MissMerit
+        miss_m_sq = (x_f - x_t)**2 + (y_f - y_t)**2 + (h_f - z_t)**2
+        s = None
 
-        if params.hit_gamma_v is not None:
-            gV_des     = math.radians(params.hit_gamma_v)
-            gV_err_deg = (gV_f - gV_des) * (180.0 / math.pi)
-            J += w_angle_v * gV_err_deg**2
+    # w_miss default: 0 in hit-line (position is free on the line), 1 in point-target
+    _w_miss = (0.0 if hit_line_mode else 1.0) if w_miss is None else w_miss
 
-        if params.hit_gamma_h is not None:
-            gH_des     = math.radians(params.hit_gamma_h)
-            gH_err_deg = (gH_f - gH_des) * (180.0 / math.pi)
-            J += w_angle_h * gH_err_deg**2
+    # ── FinalLineMerit: sigmoid proxy + quartic ReLU penalty ──────────────────
+    # Active only in hit-line mode (requires desired angles to define approach line).
+    # Proxy: exponential-weighted sigmoid over last `final_line_nodes` coast nodes.
+    #   score_k = σ(β·(tol_gV − |ΔγV_k|)) · σ(β·(tol_cos − (1−cos(ΔγH_k))))
+    #   FL_smooth = Σ_k exp(decay·(k−N2)) · score_k · v_k · h2 / 1000   (km)
+    # Penalty: pen(FL) = A · max(0, D − FL_smooth)⁴
+    #   FL ≥ D → 0; FL = D−1 km → 50; FL = D−1.5 km → ≈253
+    # The sigmoid proxy has residual dual infeasibility ~8.7e-4 at the trivial KKT,
+    # ensuring IPOPT escapes the zero-control local minimum.
+    # Exact FinalLine (hard threshold) reported in summary['final_line_km'].
+    _A_fl       = 50.0
+    _D          = final_line_deadzone_km
+    _tol_fl     = math.radians(final_line_tol_deg)
+    _tol_fl_cos = 1.0 - math.cos(_tol_fl)
+    _beta_fl    = 30.0    # sigmoid sharpness (rad⁻¹)
+    _decay_fl   = 0.3     # exponential decay per node step
 
-        s = None   # no hit-line offset in point-target mode
+    def _sig(x):
+        return 1.0 / (1.0 + ca.exp(-x))
+
+    def _fl_penalty(fl_km):
+        deficit = ca.fmax(ca.MX(0.0), _D - fl_km)
+        return _A_fl * deficit ** 4
+
+    if hit_line_mode and w_final_line > 0 and final_line_nodes > 0:
+        _k_start   = max(0, N2 - final_line_nodes)
+        _fl_smooth = ca.MX(0.0)
+        for _k in range(_k_start + 1, N2 + 1):
+            _gV_k  = S2[1, _k]
+            _gH_k  = S2[2, _k]
+            _v_k   = S2[0, _k]
+            _wt    = math.exp(_decay_fl * (_k - N2))
+            _sc_v  = _sig(_beta_fl * (_tol_fl     - ca.fabs(_gV_k - gV_des)))
+            _sc_h  = _sig(_beta_fl * (_tol_fl_cos - (1.0 - ca.cos(_gH_k - gH_des))))
+            _fl_smooth = _fl_smooth + _wt * _sc_v * _sc_h * _v_k * h2 / 1_000.0
+        final_line_merit = _fl_penalty(_fl_smooth)
+    else:
+        final_line_merit = ca.MX(0.0)
+
+    # ── Unified merit function ─────────────────────────────────────────────────
+    #   J = w_ctrl · ControlEffortMerit
+    #     + w_miss · MissMerit
+    #     + w_time · FlightTimeMerit
+    #     + w_final_line · FinalLineMerit
+    J = (w_ctrl       * ctrl_effort        # ControlEffortMerit
+       + _w_miss      * miss_m_sq          # MissMerit (m²)
+       + w_time       * T_f                # FlightTimeMerit
+       + w_final_line * final_line_merit)  # FinalLineMerit
 
     opti.minimize(J)
 
