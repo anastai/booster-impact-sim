@@ -22,9 +22,12 @@ source .venv/bin/activate
 
 # ── 5. Python dependencies ─────────────────────────────────────────────────────
 pip install --upgrade pip
-pip install matplotlib scipy numpy pytest casadi jupyter python-docx
+pip install matplotlib scipy numpy pytest casadi jupyter python-docx ipykernel
 
-# ── 6. Verify ──────────────────────────────────────────────────────────────────
+# ── 6. Register venv as Jupyter kernel ────────────────────────────────────────
+python -m ipykernel install --user --name=booster-venv --display-name "Booster Sim (.venv)"
+
+# ── 7. Verify ──────────────────────────────────────────────────────────────────
 python -m pytest tests/check_vectors.py -q
 echo ""
 echo "Setup complete. To start:"
