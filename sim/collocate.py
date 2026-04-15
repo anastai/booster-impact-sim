@@ -250,8 +250,24 @@ def _warm_start(opti, S1, U1, S2, U2, T_f_var,
                 params, t_burn, N1, N2, iacpn_ref):
     """
     Initialise NLP variables by interpolating the IACPN reference trajectory
-    onto the collocation nodes.  Falls back to linear guess on any error.
+    onto the collocation nodes.
+
+    Falls back to _linear_warm_start when:
+      - IACPN miss > max(2 km, 50% of target range)  — trajectory too far off
+      - any exception during interpolation            — data error
     """
+    # Quality gate: poor IACPN trajectory is a worse starting point than linear
+    try:
+        iacpn_miss     = float(iacpn_ref['summary']['miss_distance_m'])
+        target_range_m = math.sqrt(params.x_target**2 + params.y_target**2) * 1_000.0
+        miss_threshold = max(2_000.0, 0.5 * target_range_m)
+        if iacpn_miss > miss_threshold:
+            _linear_warm_start(opti, S1, U1, S2, U2, T_f_var,
+                               params, t_burn, N1, N2)
+            return
+    except Exception:
+        pass   # can't read miss — proceed to interpolation attempt below
+
     try:
         ser   = iacpn_ref['series']
         t_sim = np.array(ser['t'], dtype=float)
