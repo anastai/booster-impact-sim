@@ -858,11 +858,20 @@ def collocation_solve(
         'aLat_g':      (np.sqrt(U_all[0, :]**2 + U_all[1, :]**2) / G0).tolist(),
     }
 
+    iacpn_ser = iacpn_ref['series']
     return {
         'summary':  summary,
         'schedule': schedule,
         'series':   series,
-        'iacpn':    iacpn_ref['summary'],
+        'iacpn':    {
+            **iacpn_ref['summary'],
+            'series': {
+                't': iacpn_ser['t'],
+                'x': iacpn_ser['x'],
+                'y': iacpn_ser['y'],
+                'h': iacpn_ser['h'],
+            },
+        },
     }
 
 
@@ -886,22 +895,29 @@ def plot_collocated(result: dict, title: str = '') -> None:
     sched = result['schedule']
     summ  = result['summary']
     ref   = result.get('iacpn', {})
+    ref_ser = ref.get('series', {})
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     miss_str = f"{summ['miss_m']:.1f} m"
     iacpn_miss = ref.get('miss_distance_m', '?')
+    quality_str = f"  quality_ok={summ.get('quality_ok', '?')}"
+    fl_str = (f"  FinalLine={summ.get('final_line_km', '?')} km"
+              if 'final_line_km' in summ else '')
     fig.suptitle(
         (f"Direct Collocation (Hermite-Simpson)"
          f"{' — ' + title if title else ''}\n"
          f"Collocation miss = {miss_str}   "
          f"IACPN miss = {iacpn_miss} m   "
          f"t_f = {summ['flight_time_s']:.1f} s   "
-         f"solved = {summ['solved']}"),
+         f"solved = {summ['solved']}{quality_str}{fl_str}"),
         fontsize=10,
     )
 
     # Ground track
     ax = axes[0, 0]
+    if ref_ser:
+        ax.plot(ref_ser['x'], ref_ser['y'], 'b--', lw=1.2, alpha=0.55,
+                label=f'IACPN ref ({iacpn_miss} m miss)')
     ax.plot(ser['x'], ser['y'], 'b-', lw=2, label='Collocation')
     ax.scatter([ser['x'][-1]], [ser['y'][-1]], c='blue',  s=60, zorder=5)
     ax.scatter([0],            [0],            c='green', s=80, marker='^',
@@ -919,6 +935,9 @@ def plot_collocated(result: dict, title: str = '') -> None:
 
     # Altitude vs time
     ax = axes[0, 1]
+    if ref_ser:
+        ax.plot(ref_ser['t'], ref_ser['h'], 'b--', lw=1.2, alpha=0.55,
+                label='IACPN ref')
     ax.plot(ser['t'], ser['h'], 'b-', lw=2, label='Collocation')
     ax.axvline(summ['burnout_time_s'], color='orange', ls='--',
                alpha=0.7, label=f"Burnout t={summ['burnout_time_s']:.1f}s")

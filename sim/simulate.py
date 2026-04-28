@@ -18,6 +18,21 @@ _LOG_EVERY = 5       # record one sample per this many timesteps
 _MAX_STEPS = 60_000  # safety limit (~3.3 h at dt = 0.2 s)
 
 
+def _interp_a_lat_max(table: list, v_ms: float) -> float:
+    """Linear interpolation of a_lat_max (g) from a [(v, a_g), ...] table, returns m/s²."""
+    if v_ms <= table[0][0]:
+        return table[0][1] * G0
+    if v_ms >= table[-1][0]:
+        return table[-1][1] * G0
+    for i in range(len(table) - 1):
+        v0, a0 = table[i]
+        v1, a1 = table[i + 1]
+        if v0 <= v_ms <= v1:
+            frac = (v_ms - v0) / (v1 - v0)
+            return (a0 + frac * (a1 - a0)) * G0
+    return table[-1][1] * G0
+
+
 def simulate(params: Params, dt: float = 0.2) -> dict:
     """
     Run the full velocity-frame booster simulation with optional ZEM guidance.
@@ -38,7 +53,7 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
     x_target_m    = params.x_target  * 1_000.0
     y_target_m    = params.y_target  * 1_000.0
     z_target_m    = params.z_target  * 1_000.0
-    a_lat_max_ms2 = params.a_lat_max * G0
+    a_lat_max_const_ms2 = params.a_lat_max * G0   # used when no table given
     Aref          = math.pi * (params.diam / 2.0) ** 2
 
     mdot      = thrust_n / (params.isp * G0)
@@ -60,7 +75,7 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
         't', 'x', 'y', 'h', 'v',
         'gamma_v', 'gamma_h',
         'thr', 'drag_aero', 'lift', 'drag_ctrl', 'acc',
-        'aLat', 'a_nV', 'a_nH',
+        'aLat', 'a_nV', 'a_nH', 'mass', 'a_lat_max',
     ]}
 
     # ── Accumulators ──────────────────────────────────────────────────────
@@ -78,6 +93,8 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
         spd  = state.v
         grav = gravity(state.h)
         rho  = density(params.atm, state.h)
+        a_lat_max_ms2 = (_interp_a_lat_max(params.a_lat_max_table, spd)
+                         if params.a_lat_max_table else a_lat_max_const_ms2)
         qS   = 0.5 * rho * spd * spd * Aref
 
         # ── Engine: thrust, mass, propellant ──────────────────────────────
@@ -183,9 +200,11 @@ def simulate(params: Params, dt: float = 0.2) -> dict:
             series['lift']     .append(round(lift         / 1_000, 2))
             series['drag_ctrl'].append(round(drag_ctrl    / 1_000, 2))
             series['acc']      .append(0.0)   # overwritten after integrate
-            series['aLat']  .append(round(aLat_mag / G0, 4))
-            series['a_nV']  .append(round(a_nV     / G0, 4))
-            series['a_nH']  .append(round(a_nH     / G0, 4))
+            series['aLat']     .append(round(aLat_mag / G0, 4))
+            series['a_nV']     .append(round(a_nV     / G0, 4))
+            series['a_nH']     .append(round(a_nH     / G0, 4))
+            series['mass']     .append(round(state.mass, 2))
+            series['a_lat_max'].append(round(a_lat_max_ms2 / G0, 4))
 
         # ── Integrate one step ────────────────────────────────────────────
         state, acc_mag = integrate_step(

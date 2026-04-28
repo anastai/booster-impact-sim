@@ -2,3 +2,4 @@ matplotlib
 scipy
 pytest
 casadi
+openpyxl
