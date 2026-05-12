@@ -50,21 +50,27 @@ smooth (at least C¹) functions for IPOPT's interior-point solver.
 
 Merit function
 --------------
-  Unified four-component objective (same structure for both modes):
+  Objective:
 
-      J = w_ctrl      · ControlEffortMerit(pct_mean)
-        + w_miss      · MissMerit(miss_m²)
-        + w_time      · FlightTimeMerit(T_f)
-        + w_final_line· FinalLineMerit(FL_smooth)
+      J = (w_range · MeritRange
+         + w_acc   · MeritAcc
+         + w_miss_d· MeritMiss) · FlightTime
 
-  ControlEffortMerit: softplus penalty on mean control usage (% of limit).
-  MissMerit:          squared miss distance m².
-                      Hit-line mode  → miss_m = |s|  (offset along approach line).
-                      Point-target   → miss_m = ‖pos_f − pos_target‖.
-                      Default w_miss = 0 (hit-line) or 1 (point-target).
-  FlightTimeMerit:    total flight time T_f.
-  FinalLineMerit:     quartic-ReLU penalty on short FinalLine approach segment.
-                      50·max(0, D − FL_smooth)⁴.  Meaningful only in hit-line mode.
+  Each component uses the softplus-fence density function (see DensityParams):
+
+      density(ratio) = fenceC1 · softplus(ratio − fenceX, betaX)²
+                     + fenceC2 · softplus(ratio − fenceY, betaY)⁴
+
+  Ratios:
+    MeritRange  → ratio = 1 − FinalLineLength_km / 2
+                  FinalLineLength: smooth proxy for the length of the approach
+                  segment where both angle conditions are met (hit-line mode).
+                  Backward search from terminal starts at final_line_togo_m.
+                  In point-target mode: 1 − (horizontal range / target range).
+    MeritAcc    → ratio = mean of density(|u_k|/a_max_k) over all nodes
+    MeritMiss   → ratio = miss_at_StartFinalLine / miss_ref_m
+                  Miss is the perpendicular distance from StartFinalLine to the
+                  approach line (hit-line mode) or 3-D distance to target.
 
   Terminal constraints for hit-line mode (hard, not in objective):
       x_f = x_t + s·d̂_x,  y_f = y_t + s·d̂_y,  h_f = z_t + s·d̂_z
@@ -84,6 +90,7 @@ Dependencies
 """
 from __future__ import annotations
 
+import dataclasses
 import math
 import numpy as np
 
@@ -97,6 +104,27 @@ except ImportError as exc:
 
 from .physics import Params, G0
 from .simulate import simulate as _sim_iacpn
+
+
+@dataclasses.dataclass
+class DensityParams:
+    """Parameters for one softplus-fence density merit component.
+
+    density(ratio) = fenceC1 · softplus(ratio − fenceX, betaX)²
+                   + fenceC2 · softplus(ratio − fenceY, betaY)⁴
+
+    softplus(x, beta) = (1/beta) · log(1 + exp(beta·x))
+
+    Both posts should satisfy fenceX ≤ fenceY for a smooth two-stage ramp.
+    Negative thresholds are valid when the ratio can be negative (e.g. range).
+    """
+    fenceX:  float = 0.2    # ratio threshold for the quadratic ramp
+    fenceY:  float = 0.5    # ratio threshold for the quartic ramp
+    betaX:   float = 5.0    # softplus sharpness at fenceX
+    betaY:   float = 10.0   # softplus sharpness at fenceY
+    fenceC1: float = 1.0    # quadratic coefficient
+    fenceC2: float = 0.5    # quartic coefficient
+
 
 # ── Atmosphere / gravity (CasADi-compatible) ──────────────────────────────────
 
@@ -378,18 +406,20 @@ def collocation_solve(
     tf_guess:            float|None = None,
     angle_tol_deg:          float      = 5.0,
     hit_line_range_max:     float      = 50.0,   # km — max |s| along the line
-    # ── Four merit weights (same structure for both modes) ───────────────────
-    w_ctrl:                 float      = 1.0,    # ControlEffortMerit weight
-    w_miss:           float|None       = None,   # MissMerit weight  (auto: 0 hit-line, 1 point-target)
-    w_time:                 float      = 1e-3,   # FlightTimeMerit weight
-    w_final_line:           float      = 0.1,    # FinalLineMerit weight (0 = disabled)
-    # ── FinalLine options ────────────────────────────────────────────────────
-    final_line_tol_deg:     float      = 3.0,    # angle tolerance for FinalLine (deg)
-    final_line_nodes:       int        = 10,     # terminal coast nodes in FL smooth proxy
-    final_line_deadzone_km: float      = 1.0,    # FL above this → no penalty (km)
+    # ── FinalLine options (used for MeritRange ratio and miss at StartFinalLine) ─
+    final_line_tol_deg:  float = 3.0,   # angle tolerance for "inside final line" (deg)
+    final_line_togo_m:   float = 500.0, # backward search starts at this togo distance (m)
+    # ── Density merit weights ────────────────────────────────────────────────
+    w_range:           float            = 1.0,   # weight for MeritRange
+    w_acc:             float            = 1.0,   # weight for MeritAcc
+    w_miss_d:          float            = 1.0,   # weight for MeritMiss
+    miss_ref_m:        float|None       = 500.0, # miss normalisation ref (m); None → target range
+    range_dp:          DensityParams|None = None,  # Range density params (see DensityParams)
+    acc_dp:            DensityParams|None = None,  # Acc density params
+    miss_dp:           DensityParams|None = None,  # Miss density params
     # ── Solver options ────────────────────────────────────────────────────────
-    warm_start:          str        = 'iacpn',
-    ipopt_opts:          dict|None  = None,
+    warm_start:        str             = 'iacpn',
+    ipopt_opts:        dict|None       = None,
 ) -> dict:
     """
     Solve the booster trajectory OCP via Hermite-Simpson direct collocation.
@@ -403,20 +433,19 @@ def collocation_solve(
     angle_tol_deg      : Hard angle tolerance at terminal node for hit-line mode (deg). Default 5.
     hit_line_range_max : Max signed offset |s| along the hit line (km). Default 50.
 
-    Merit weights — same four components for both modes:
-    w_ctrl             : ControlEffortMerit — softplus penalty on mean control usage.
-    w_miss             : MissMerit — squared miss distance (m²).
-                         Default 0.0 in hit-line mode (position is free on the approach line);
-                         Default 1.0 in point-target mode (drives vehicle to target).
-    w_time             : FlightTimeMerit — total flight time T_f.
-    w_final_line       : FinalLineMerit — quartic-ReLU penalty on short FinalLine.
-                         50·max(0, D−FL_smooth)⁴.  Set to 0 to disable. Default 0.1.
-                         Only meaningful in hit-line mode; effectively 0 otherwise.
+    FinalLine options (MeritRange ratio and miss at StartFinalLine):
+    final_line_tol_deg : Angle tolerance for the "inside final line" condition (deg). Default 3°.
+    final_line_togo_m  : Backward search starts at this distance-to-go from terminal (m). Default 500.
 
-    FinalLine options:
-    final_line_tol_deg    : Angle tolerance for FinalLine metric and sigmoid proxy (deg). Default 3°.
-    final_line_nodes      : Terminal coast nodes used in sigmoid FL proxy. Default 10.
-    final_line_deadzone_km: FL above this → zero FinalLine penalty. Default 1.0 km.
+    Density merit weights:
+    w_range            : Weight for MeritRange. Default 1.0.
+    w_acc              : Weight for MeritAcc. Default 1.0.
+    w_miss_d           : Weight for MeritMiss. Default 1.0.
+    miss_ref_m         : Reference miss distance for normalisation (m).
+                         None → use horizontal target range sqrt(x_t²+y_t²).
+    range_dp           : DensityParams for MeritRange. Defaults if None.
+    acc_dp             : DensityParams for MeritAcc. Defaults if None.
+    miss_dp            : DensityParams for MeritMiss. Defaults if None.
 
     warm_start         : 'iacpn' — interpolate IACPN reference run onto nodes.
                          'linear' — simple straight-line interpolation.
@@ -566,53 +595,7 @@ def collocation_solve(
     x_f, y_f, h_f = S2[4, N2], S2[5, N2], S2[3, N2]
     gV_f, gH_f    = S2[1, N2], S2[2, N2]
 
-    # ── Softplus: f(x) = log(1 + exp(x)) ────────────────────────────────
-    # Standard mathematical softplus, numerically stable for large x.
-    # Direct formula log(1+exp(x)) overflows for x > ~710 in float64.
-    # Equivalent stable form: clamp the exp input to 50, add the linear
-    # tail for x > 50.  Result is identical to log(1+exp(x)) everywhere.
-    def _softplus(x):
-        return ca.log(1.0 + ca.exp(ca.fmin(x, 50.0))) + ca.fmax(x - 50.0, 0.0)
-
-    # ── Control effort: mean |u_k|/a_max(v_k) across all nodes (%) ──────
-    # pct_k = |u_k| / a_max(v_k) * 100  — how far each node is from its limit
-    # pct_mean = mean(pct_k) over all N1+1 + N2+1 nodes
-    #
-    # Penalty shape (two-term softplus):
-    #   pct < 50 % : ≈ 0          (dead zone)
-    #   pct = 80 % : ≈ 100        (calibrated)
-    #   pct = 95 % : ≈ 900
-    #   pct = 100% : ≈ 1 668      (very large)
-    #
-    # Term 1 — gradual softplus from 50%:
-    #   a1 * (softplus(pct - 50) - log2)   calibrated so term1(80) = 100
-    # Term 2 — steep softplus near 100%:
-    #   a2 * softplus(β2 * (pct - 90))     essentially 0 below ~85%, steep above
-    _log2 = math.log(2.0)
-    _a1   = 100.0 / (math.log(1.0 + math.exp(30.0)) - _log2)   # ≈ 3.412
-    _a2   = 100.0
-    _beta2 = 1.5
-
-    def _ctrl_merit(pct):
-        """Softplus penalty on mean control effort percentage (0–100)."""
-        term1 = _a1  * (_softplus(pct - 50.0) - _log2)
-        term2 = _a2  *  _softplus(_beta2 * (pct - 90.0))
-        return term1 + term2
-
-    # Accumulate pct_k = |u_k| / a_max_k * 100 at every node
     _n_nodes = (N1 + 1) + (N2 + 1)
-    _pct_sum = ca.MX(0)
-    for k in range(N1 + 1):
-        u_mag = ca.sqrt(U1[0, k]**2 + U1[1, k]**2 + 1e-8)
-        ak    = ca.fmax(_a_max_fn(S1[0, k]), 1.0)
-        _pct_sum = _pct_sum + u_mag / ak * 100.0
-    for k in range(N2 + 1):
-        u_mag = ca.sqrt(U2[0, k]**2 + U2[1, k]**2 + 1e-8)
-        ak    = ca.fmax(_a_max_fn(S2[0, k]), 1.0)
-        _pct_sum = _pct_sum + u_mag / ak * 100.0
-
-    pct_mean    = _pct_sum / _n_nodes
-    ctrl_effort = _ctrl_merit(pct_mean)
 
     # ── Terminal constraints (mode-specific) ─────────────────────────────────
     hit_line_mode = (params.hit_gamma_v is not None and
@@ -643,65 +626,130 @@ def collocation_solve(
         opti.subject_to(gV_f - gV_des <=  angle_tol_rad)
         opti.subject_to(gV_des - gV_f <=  angle_tol_rad)
         opti.subject_to(ca.cos(gH_f - gH_des) >= math.cos(angle_tol_rad))
-
-        # MissMerit input: squared offset along approach line
-        miss_m_sq = s ** 2
     else:
-        # Point-target: no hard terminal constraints — position driven by MissMerit
-        miss_m_sq = (x_f - x_t)**2 + (y_f - y_t)**2 + (h_f - z_t)**2
         s = None
 
-    # w_miss default: 0 in hit-line (position is free on the line), 1 in point-target
-    _w_miss = (0.0 if hit_line_mode else 1.0) if w_miss is None else w_miss
-
-    # ── FinalLineMerit: sigmoid proxy + quartic ReLU penalty ──────────────────
-    # Active only in hit-line mode (requires desired angles to define approach line).
-    # Proxy: exponential-weighted sigmoid over last `final_line_nodes` coast nodes.
-    #   score_k = σ(β·(tol_gV − |ΔγV_k|)) · σ(β·(tol_cos − (1−cos(ΔγH_k))))
-    #   FL_smooth = Σ_k exp(decay·(k−N2)) · score_k · v_k · h2 / 1000   (km)
-    # Penalty: pen(FL) = A · max(0, D − FL_smooth)⁴
-    #   FL ≥ D → 0; FL = D−1 km → 50; FL = D−1.5 km → ≈253
-    # The sigmoid proxy has residual dual infeasibility ~8.7e-4 at the trivial KKT,
-    # ensuring IPOPT escapes the zero-control local minimum.
-    # Exact FinalLine (hard threshold) reported in summary['final_line_km'].
-    _A_fl       = 50.0
-    _D          = final_line_deadzone_km
+    # ── FinalLine length and miss at StartFinalLine ───────────────────────────
+    # Algorithm (hit-line mode):
+    #   1. Per node k: ratio_angle_k = |gV_k − gV_des|  and  (1−cos(gH_k−gH_des))
+    #      inside_k = σ(β·(tol_gV − ratio_gV_k)) · σ(β·(tol_cos − ratio_gH_k))
+    #   2. togo_k = approximate distance-to-terminal at node k  (m)
+    #      in_window_k = σ(α·(togo_k − final_line_togo_m))   ≈ 1 when togo > togo_m
+    #   3. Cumulative product from terminal going backward:
+    #      cum[N2] = 1;  cum[k] = cum[k+1]·(1 − in_window[k]·(1−inside[k]))
+    #      (nodes closer than final_line_togo_m are treated as always satisfied)
+    #   4. FL_smooth_km = Σ_k cum[k]·v_k·h2 / 1000
+    #   5. StartFinalLine position: soft-weighted node at the inside→outside transition
+    #      miss_m_sq = perp distance² from SFL to approach line
     _tol_fl     = math.radians(final_line_tol_deg)
     _tol_fl_cos = 1.0 - math.cos(_tol_fl)
-    _beta_fl    = 30.0    # sigmoid sharpness (rad⁻¹)
-    _decay_fl   = 0.3     # exponential decay per node step
+    _beta_fl    = 10.0   # sigmoid sharpness for angle condition (rad⁻¹)
+    _alpha_win  = 0.02   # sigmoid sharpness for togo window (m⁻¹)
 
     def _sig(x):
         return 1.0 / (1.0 + ca.exp(-x))
 
-    def _fl_penalty(fl_km):
-        deficit = ca.fmax(ca.MX(0.0), _D - fl_km)
-        return _A_fl * deficit ** 4
+    if hit_line_mode:
+        # Step 1 — per-node angle condition (product of two sigmoids)
+        _inside = []
+        for _k in range(N2 + 1):
+            _sc_v = _sig(_beta_fl * (_tol_fl     - ca.fabs(S2[1, _k] - gV_des)))
+            _sc_h = _sig(_beta_fl * (_tol_fl_cos - (1.0 - ca.cos(S2[2, _k] - gH_des))))
+            _inside.append(_sc_v * _sc_h)
 
-    if hit_line_mode and w_final_line > 0 and final_line_nodes > 0:
-        _k_start   = max(0, N2 - final_line_nodes)
-        _fl_smooth = ca.MX(0.0)
-        for _k in range(_k_start + 1, N2 + 1):
-            _gV_k  = S2[1, _k]
-            _gH_k  = S2[2, _k]
-            _v_k   = S2[0, _k]
-            _wt    = math.exp(_decay_fl * (_k - N2))
-            _sc_v  = _sig(_beta_fl * (_tol_fl     - ca.fabs(_gV_k - gV_des)))
-            _sc_h  = _sig(_beta_fl * (_tol_fl_cos - (1.0 - ca.cos(_gH_k - gH_des))))
-            _fl_smooth = _fl_smooth + _wt * _sc_v * _sc_h * _v_k * h2 / 1_000.0
-        final_line_merit = _fl_penalty(_fl_smooth)
+        # Step 2 — togo_k (m) and window indicator
+        _togo = [None] * (N2 + 1)
+        _togo[N2] = ca.MX(0.0)
+        for _k in range(N2 - 1, -1, -1):
+            _togo[_k] = _togo[_k + 1] + S2[0, _k] * h2   # v_k · h2
+        _in_win = [_sig(_alpha_win * (_togo[_k] - final_line_togo_m))
+                   for _k in range(N2 + 1)]
+
+        # Step 3 — cumulative product from terminal (backward)
+        _cum = [None] * (N2 + 1)
+        _cum[N2] = ca.MX(1.0)
+        for _k in range(N2 - 1, -1, -1):
+            _cum[_k] = _cum[_k + 1] * (1.0 - _in_win[_k] * (1.0 - _inside[_k]))
+
+        # Step 4 — FL_smooth_km: path-length integral weighted by cumulative inside
+        _fl_smooth_km = ca.MX(0.0)
+        for _k in range(N2 + 1):
+            _fl_smooth_km = _fl_smooth_km + _cum[_k] * S2[0, _k] * h2 / 1_000.0
+
+        # Step 5 — Miss at StartFinalLine: weighted sum of per-node perpendicular distances²
+        # transition_weight_k = cum[k+1] · in_window[k] · (1 − inside[k])
+        #   peaks at the node where angles first fail going backward from terminal.
+        #   When the whole trajectory is inside: all weights ≈ 0 → miss_m_sq ≈ 0 (correct).
+        #   No position average / no division → no degenerate-case gradient issues.
+        miss_m_sq = ca.MX(0.0)
+        for _k in range(N2):   # terminal node has no "transition from outside"
+            _w    = _cum[_k + 1] * _in_win[_k] * (1.0 - _inside[_k])
+            _dx_k = S2[4, _k] - x_t
+            _dy_k = S2[5, _k] - y_t
+            _dh_k = S2[3, _k] - z_t
+            _proj_k   = _dx_k * d_x + _dy_k * d_y + _dh_k * d_z
+            _perp_sq_k = ((_dx_k - _proj_k*d_x)**2
+                        + (_dy_k - _proj_k*d_y)**2
+                        + (_dh_k - _proj_k*d_z)**2)
+            miss_m_sq = miss_m_sq + _w * _perp_sq_k
     else:
-        final_line_merit = ca.MX(0.0)
+        _fl_smooth_km = ca.MX(0.0)
+        miss_m_sq     = (x_f - x_t)**2 + (y_f - y_t)**2 + (h_f - z_t)**2
 
-    # ── Unified merit function ─────────────────────────────────────────────────
-    #   J = w_ctrl · ControlEffortMerit
-    #     + w_miss · MissMerit
-    #     + w_time · FlightTimeMerit
-    #     + w_final_line · FinalLineMerit
-    J = (w_ctrl       * ctrl_effort        # ControlEffortMerit
-       + _w_miss      * miss_m_sq          # MissMerit (m²)
-       + w_time       * T_f                # FlightTimeMerit
-       + w_final_line * final_line_merit)  # FinalLineMerit
+    # ── Softplus-fence density merit ──────────────────────────────────────────
+    # Parameterised softplus: (1/beta)·log(1+exp(beta·x)), numerically stable.
+    # Matches MATLAB softplus(x,beta) in softplus.txt — no branching needed.
+    def _sp_beta(x, beta):
+        bx = beta * x
+        return ca.log(1.0 + ca.exp(-ca.fabs(bx))) / beta + ca.fmax(x, 0.0)
+
+    def _fence_density(ratio, dp: DensityParams):
+        """fenceC1·sp(ratio−fenceX,betaX)² + fenceC2·sp(ratio−fenceY,betaY)⁴"""
+        qx = _sp_beta(ratio - dp.fenceX, dp.betaX)
+        qy = _sp_beta(ratio - dp.fenceY, dp.betaY)
+        return dp.fenceC1 * qx**2 + dp.fenceC2 * qy**4
+
+    # Resolve default density parameters per component
+    _rdp = range_dp if range_dp is not None else DensityParams(
+        fenceX=0.05, fenceY=0.2, betaX=5.0, betaY=3.0, fenceC1=1.0, fenceC2=0.5)
+    _adp = acc_dp   if acc_dp   is not None else DensityParams(
+        fenceX=0.5,  fenceY=0.8, betaX=5.0, betaY=3.0, fenceC1=1.0, fenceC2=2.0)
+    _mdp = miss_dp  if miss_dp  is not None else DensityParams(
+        fenceX=0.0,  fenceY=0.1, betaX=10.0, betaY=5.0, fenceC1=1.0, fenceC2=2.0)
+
+    # Miss normalisation reference
+    _range_ref_m = max(math.sqrt(x_t**2 + y_t**2), 1.0)
+    _miss_ref_m  = float(miss_ref_m) if miss_ref_m is not None else _range_ref_m
+
+    # ── Ratios ────────────────────────────────────────────────────────────────
+    # MeritRange : ratio = 1 − FinalLineLength_km / 2
+    #   In point-target mode: fallback to 1 − horizontal_range / target_range.
+    if hit_line_mode:
+        _ratio_range = 1.0 - _fl_smooth_km / 2.0
+    else:
+        _ratio_range = 1.0 - ca.sqrt(x_f**2 + y_f**2 + 1e-6) / _range_ref_m
+
+    # MeritAcc : mean of density(ratio_k) over all collocation nodes
+    # ratio_k = |u_k| / a_max_k  (normalised lateral acceleration, 0–1)
+    _acc_dens_sum = ca.MX(0.0)
+    for k in range(N1 + 1):
+        _u_mag        = ca.sqrt(U1[0, k]**2 + U1[1, k]**2 + 1e-8)
+        _ak           = ca.fmax(_a_max_fn(S1[0, k]), 1.0)
+        _acc_dens_sum = _acc_dens_sum + _fence_density(_u_mag / _ak, _adp)
+    for k in range(N2 + 1):
+        _u_mag        = ca.sqrt(U2[0, k]**2 + U2[1, k]**2 + 1e-8)
+        _ak           = ca.fmax(_a_max_fn(S2[0, k]), 1.0)
+        _acc_dens_sum = _acc_dens_sum + _fence_density(_u_mag / _ak, _adp)
+    _merit_acc_d = _acc_dens_sum / _n_nodes
+
+    # MeritMiss  : normalised miss distance
+    _ratio_miss = ca.sqrt(miss_m_sq + 1e-12) / _miss_ref_m
+
+    # ── Objective ─────────────────────────────────────────────────────────────
+    # J = (w_range·MeritRange + w_acc·MeritAcc + w_miss_d·MeritMiss) · FlightTime
+    J = (w_range  * _fence_density(_ratio_range, _rdp)
+       + w_acc    * _merit_acc_d
+       + w_miss_d * _fence_density(_ratio_miss,  _mdp)) * T_f
 
     opti.minimize(J)
 
@@ -879,14 +927,16 @@ def collocation_solve(
 
 def plot_collocated(result: dict, title: str = '') -> None:
     """
-    4-panel comparison: IACPN reference (dashed) vs direct collocation (solid).
+    6-panel comparison: IACPN reference (dashed) vs direct collocation (solid).
 
     Panels
     ------
-      Top-left  : Ground track (North–East plane)
-      Top-right : Altitude vs time
-      Bot-left  : Pitch command a_nV  vs time
-      Bot-right : Yaw command  a_nH  vs time
+      [0,0] Ground track (North–East plane)
+      [0,1] Altitude vs time
+      [1,0] Pitch command a_nV  vs time
+      [1,1] Yaw command  a_nH  vs time
+      [2,0] Flight-path angle γV vs time
+      [2,1] Heading azimuth   γH vs time
     """
     import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
@@ -897,7 +947,7 @@ def plot_collocated(result: dict, title: str = '') -> None:
     ref   = result.get('iacpn', {})
     ref_ser = ref.get('series', {})
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    fig, axes = plt.subplots(3, 2, figsize=(12, 11))
     miss_str = f"{summ['miss_m']:.1f} m"
     iacpn_miss = ref.get('miss_distance_m', '?')
     quality_str = f"  quality_ok={summ.get('quality_ok', '?')}"
@@ -974,6 +1024,47 @@ def plot_collocated(result: dict, title: str = '') -> None:
     ax.set_xlabel('Time (s)')
     ax.set_ylabel('a_nH (g)')
     ax.set_title('Yaw Command a_nH')
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    # Desired angles (available in hit-line mode: err = final − desired)
+    _des_gv = (summ['final_gamma_v_deg'] - summ['gamma_v_err_deg']
+               if 'gamma_v_err_deg' in summ else None)
+    _des_gh = (summ['final_gamma_h_deg'] - summ['gamma_h_err_deg']
+               if 'gamma_h_err_deg' in summ else None)
+
+    # Flight-path angle γV vs time
+    ax = axes[2, 0]
+    if ref_ser and 'gamma_v' in ref_ser:
+        ax.plot(ref_ser['t'], ref_ser['gamma_v'], 'b--', lw=1.2, alpha=0.55,
+                label='IACPN ref')
+    ax.plot(ser['t'], ser['gamma_v_deg'], 'b-', lw=2, label='Collocation')
+    ax.axvline(summ['burnout_time_s'], color='orange', ls='--', alpha=0.7,
+               label=f"Burnout t={summ['burnout_time_s']:.1f}s")
+    if _des_gv is not None:
+        ax.axhline(_des_gv, color='red', ls=':', lw=1.2,
+                   label=f'Desired γV={_des_gv:.1f}°')
+    ax.axhline(0, color='k', lw=0.5)
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('γV (deg)')
+    ax.set_title('Flight-path angle γV vs Time')
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    # Heading azimuth γH vs time
+    ax = axes[2, 1]
+    if ref_ser and 'gamma_h' in ref_ser:
+        ax.plot(ref_ser['t'], ref_ser['gamma_h'], 'r--', lw=1.2, alpha=0.55,
+                label='IACPN ref')
+    ax.plot(ser['t'], ser['gamma_h_deg'], 'r-', lw=2, label='Collocation')
+    ax.axvline(summ['burnout_time_s'], color='orange', ls='--', alpha=0.7,
+               label=f"Burnout t={summ['burnout_time_s']:.1f}s")
+    if _des_gh is not None:
+        ax.axhline(_des_gh, color='darkred', ls=':', lw=1.2,
+                   label=f'Desired γH={_des_gh:.1f}°')
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('γH (deg)')
+    ax.set_title('Heading azimuth γH vs Time')
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
 
